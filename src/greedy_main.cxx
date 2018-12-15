@@ -27,6 +27,7 @@
 
 #include "GreedyAPI.h"
 #include "CommandLineHelper.h"
+#include "cbicaCmdParser.h"
 
 #include <iostream>
 #include <sstream>
@@ -171,6 +172,8 @@ int main(int argc, char *argv[])
   GreedyParameters::SetToDefaults(param);
 
   double current_weight = 1.0;
+  
+  // add CmdParser here
 
   // reslice mode parameters
   InterpSpec interp_current;
