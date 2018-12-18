@@ -31,6 +31,21 @@ OPTION(GREEDY_BUILD_MACF "Build experimental multi-atlas correspondence fusion c
 # Dependent packages
 #--------------------------------------------------------------------------------
 
+FIND_PACKAGE(ITK)
+IF(NOT EXISTS ${ITK_USE_FILE})
+
+  IF( NOT EXISTS ${PROJECT_BINARY_DIR}/ITK-build/ITKConfig.cmake )
+
+    OPTION( CAPTK_SUPERBUILD "Do a Superbuild of the CaPTk dependencies or Specify ITK install directory with the defined components" ON )
+    IF( CAPTK_SUPERBUILD )
+      PROJECT(${PROJECT_NAME}_Depends)
+      INCLUDE( cmake_modules/External-ITK.cmake )
+      return()
+    ENDIF()
+
+  ENDIF()
+ENDIF()
+
 # ITK
 FIND_PACKAGE(ITK 4.12.2 REQUIRED)
 INCLUDE(${ITK_USE_FILE})
