@@ -36,8 +36,8 @@ IF(NOT EXISTS ${ITK_USE_FILE})
 
   IF( NOT EXISTS ${PROJECT_BINARY_DIR}/ITK-build/ITKConfig.cmake )
 
-    OPTION( CAPTK_SUPERBUILD "Do a Superbuild of the CaPTk dependencies or Specify ITK install directory with the defined components" ON )
-    IF( CAPTK_SUPERBUILD )
+    OPTION( GREEDY_SUPERBUILD "Do a Superbuild of the specific ITK install directory with the defined components" ON )
+    IF( GREEDY_SUPERBUILD )
       PROJECT(${PROJECT_NAME}_Depends)
       INCLUDE( cmake_modules/External-ITK.cmake )
       return()
