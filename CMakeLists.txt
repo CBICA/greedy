@@ -31,21 +31,6 @@ OPTION(GREEDY_BUILD_MACF "Build experimental multi-atlas correspondence fusion c
 # Dependent packages
 #--------------------------------------------------------------------------------
 
-FIND_PACKAGE(ITK)
-IF(NOT EXISTS ${ITK_USE_FILE})
-
-  IF( NOT EXISTS ${PROJECT_BINARY_DIR}/ITK-build/ITKConfig.cmake )
-
-    OPTION( GREEDY_SUPERBUILD "Do a Superbuild of the specific ITK install directory with the defined components" ON )
-    IF( GREEDY_SUPERBUILD )
-      PROJECT(${PROJECT_NAME}_Depends)
-      INCLUDE( cmake_modules/External-ITK.cmake )
-      return()
-    ENDIF()
-
-  ENDIF()
-ENDIF()
-
 # ITK
 FIND_PACKAGE(ITK 4.12.2 REQUIRED)
 INCLUDE(${ITK_USE_FILE})
@@ -140,6 +125,9 @@ ENDIF()
 ADD_EXECUTABLE(greedy ${GREEDY_SRC})
 TARGET_LINK_LIBRARIES(greedy greedyapi ${ITK_LIBRARIES} ${FFTWF_LIB} ${FFTWF_THREADS_LIB})
 INSTALL(TARGETS greedy DESTINATION bin COMPONENT Runtime)
+
+ADD_EXECUTABLE(GreedyWrapper src/GreedyWrapper.cxx src/cbicaCmdParser.cpp src/cbicaUtilities.cpp)
+INSTALL(TARGETS GreedyWrapper DESTINATION bin COMPONENT Runtime)
 
 ADD_EXECUTABLE(test_accum testing/src/TestOneDimensionalInPlaceAccumulateFilter.cxx)
 TARGET_LINK_LIBRARIES(test_accum ${ITK_LIBRARIES})
