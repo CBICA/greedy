@@ -52,7 +52,7 @@ static const char  cSeparator = '/';
 #include <string>
 #include <vector>
 #include "cbicaCmdParser.h"
-#include "yaml-cpp/yaml.h"
+//#include "yaml-cpp/yaml.h"
 
 
 #ifndef PROJECT_VERSION
@@ -1201,147 +1201,148 @@ namespace cbica
     if (!cbica::fileExists(cwlfileName) || overwriteFile)
     {
       file.open(cwlfileName.c_str());
-
-      YAML::Node config = YAML::LoadFile(cwlfileName);
-
-      config["cwlVersion"] = "v1.0";
-      config["class"] = "CommandLineTool";
-      config["version"] = m_version;
-      config["baseCommand"] = (m_exeName);
-      
-      YAML::Node inputs = config["inputs"];
-      
-      for (size_t i = 0; i < m_requiredParameters.size(); i++)
-      {
-        config["inputs"]["-" + m_requiredParameters[i].verbose];
-        config["inputs"][m_requiredParameters[i].verbose]["type"] =
-          (m_requiredParameters[i].dataType_string == "STRING") ? "string" :
-          (m_requiredParameters[i].dataType_string == "DIRECTORY") ? "Directory" :
-          (m_requiredParameters[i].dataType_string == "FLOAT") ? "float" :
-          (m_requiredParameters[i].dataType_string == "BOOL") ? "boolean" :
-          (m_requiredParameters[i].dataType_string == "NONE") ? "string" :
-          (m_requiredParameters[i].dataType_string == "UNKNOWN") ? "string" :
-          (m_requiredParameters[i].dataType_string == "INTEGER") ? "int" :
-          (m_requiredParameters[i].dataType_string == "FILE") ? "File" :
-          "string";
-        config["inputs"][m_requiredParameters[i].verbose]["label"] = m_requiredParameters[i].dataRange == "" ? "none" : m_requiredParameters[i].dataRange;
-        YAML::Node inputBinding = config["inputBinding"];
-        config["inputs"][m_requiredParameters[i].verbose]["inputBinding"]["position"] = 1;
-        config["inputs"][m_requiredParameters[i].verbose]["inputBinding"]["prefix"] = "-" + m_requiredParameters[i].laconic;
-        config["inputs"][m_requiredParameters[i].verbose]["doc"] =
-          (m_requiredParameters[i].descriptionLine1 == "" ? "" : (m_requiredParameters[i].descriptionLine1 + ".")) +
-          (m_requiredParameters[i].descriptionLine2 == "" ? "" : (m_requiredParameters[i].descriptionLine2 + ".")) +
-          (m_requiredParameters[i].descriptionLine3 == "" ? "" : (m_requiredParameters[i].descriptionLine3 + ".")) +
-          (m_requiredParameters[i].descriptionLine4 == "" ? "" : (m_requiredParameters[i].descriptionLine4 + ".")) +
-          (m_requiredParameters[i].descriptionLine5 == "" ? "" : (m_requiredParameters[i].descriptionLine5 + "."));
-      }
-
-      if (m_optionalParameters.size() > 0) {
-        for (size_t i = 0; i < m_optionalParameters.size(); i++)
-        {
-          if (m_optionalParameters[i].verbose == "help" ||
-            m_optionalParameters[i].verbose == "usage" ||
-            m_optionalParameters[i].verbose == "version" ||
-            m_optionalParameters[i].verbose == "LogFile") {
-            continue;
-          }
-          else {
-            config["inputs"]["-" + m_optionalParameters[i].verbose];
-            config["inputs"][m_optionalParameters[i].verbose]["type"] =
-              (m_optionalParameters[i].dataType_string == "STRING") ? "string?" :
-              (m_optionalParameters[i].dataType_string == "DIRECTORY") ? "Directory?" :
-              (m_optionalParameters[i].dataType_string == "FLOAT") ? "float?" :
-              (m_optionalParameters[i].dataType_string == "BOOL") ? "boolean?" :
-              (m_optionalParameters[i].dataType_string == "NONE") ? "string?" :
-              (m_optionalParameters[i].dataType_string == "UNKNOWN") ? "string?" :
-              (m_optionalParameters[i].dataType_string == "INTEGER") ? "int?" :
-              (m_optionalParameters[i].dataType_string == "FILE") ? "File?" :
-              "string?";
-            config["inputs"][m_optionalParameters[i].verbose]["label"] = m_optionalParameters[i].dataRange == "" ? "none" : m_optionalParameters[i].dataRange;
-            config["inputs"][m_optionalParameters[i].verbose]["inputBinding"];
-            config["inputs"][m_optionalParameters[i].verbose]["inputBinding"]["position"] = 1;
-            config["inputs"][m_optionalParameters[i].verbose]["inputBinding"]["prefix"] = "-" + m_optionalParameters[i].laconic;
-            config["inputs"][m_optionalParameters[i].verbose]["doc"] =
-              (m_optionalParameters[i].descriptionLine1 == "" ? "" : (m_optionalParameters[i].descriptionLine1 + ".")) +
-              (m_optionalParameters[i].descriptionLine2 == "" ? "" : (m_optionalParameters[i].descriptionLine2 + ".")) +
-              (m_optionalParameters[i].descriptionLine3 == "" ? "" : (m_optionalParameters[i].descriptionLine3 + ".")) +
-              (m_optionalParameters[i].descriptionLine4 == "" ? "" : (m_optionalParameters[i].descriptionLine4 + ".")) +
-              (m_optionalParameters[i].descriptionLine5 == "" ? "" : (m_optionalParameters[i].descriptionLine5 + "."));
-          }
-        }
-      }
-
-      std::ofstream fout(cwlfileName);
-      fout << config;
     }
+    //  YAML::Node config = YAML::LoadFile(cwlfileName);
+
+    //  config["cwlVersion"] = "v1.0";
+    //  config["class"] = "CommandLineTool";
+    //  config["version"] = m_version;
+    //  config["baseCommand"] = (m_exeName);
+    //  
+    //  YAML::Node inputs = config["inputs"];
+    //  
+    //  for (size_t i = 0; i < m_requiredParameters.size(); i++)
+    //  {
+    //    config["inputs"]["-" + m_requiredParameters[i].verbose];
+    //    config["inputs"][m_requiredParameters[i].verbose]["type"] =
+    //      (m_requiredParameters[i].dataType_string == "STRING") ? "string" :
+    //      (m_requiredParameters[i].dataType_string == "DIRECTORY") ? "Directory" :
+    //      (m_requiredParameters[i].dataType_string == "FLOAT") ? "float" :
+    //      (m_requiredParameters[i].dataType_string == "BOOL") ? "boolean" :
+    //      (m_requiredParameters[i].dataType_string == "NONE") ? "string" :
+    //      (m_requiredParameters[i].dataType_string == "UNKNOWN") ? "string" :
+    //      (m_requiredParameters[i].dataType_string == "INTEGER") ? "int" :
+    //      (m_requiredParameters[i].dataType_string == "FILE") ? "File" :
+    //      "string";
+    //    config["inputs"][m_requiredParameters[i].verbose]["label"] = m_requiredParameters[i].dataRange == "" ? "none" : m_requiredParameters[i].dataRange;
+    //    YAML::Node inputBinding = config["inputBinding"];
+    //    config["inputs"][m_requiredParameters[i].verbose]["inputBinding"]["position"] = 1;
+    //    config["inputs"][m_requiredParameters[i].verbose]["inputBinding"]["prefix"] = "-" + m_requiredParameters[i].laconic;
+    //    config["inputs"][m_requiredParameters[i].verbose]["doc"] =
+    //      (m_requiredParameters[i].descriptionLine1 == "" ? "" : (m_requiredParameters[i].descriptionLine1 + ".")) +
+    //      (m_requiredParameters[i].descriptionLine2 == "" ? "" : (m_requiredParameters[i].descriptionLine2 + ".")) +
+    //      (m_requiredParameters[i].descriptionLine3 == "" ? "" : (m_requiredParameters[i].descriptionLine3 + ".")) +
+    //      (m_requiredParameters[i].descriptionLine4 == "" ? "" : (m_requiredParameters[i].descriptionLine4 + ".")) +
+    //      (m_requiredParameters[i].descriptionLine5 == "" ? "" : (m_requiredParameters[i].descriptionLine5 + "."));
+    //  }
+
+    //  if (m_optionalParameters.size() > 0) {
+    //    for (size_t i = 0; i < m_optionalParameters.size(); i++)
+    //    {
+    //      if (m_optionalParameters[i].verbose == "help" ||
+    //        m_optionalParameters[i].verbose == "usage" ||
+    //        m_optionalParameters[i].verbose == "version" ||
+    //        m_optionalParameters[i].verbose == "LogFile") {
+    //        continue;
+    //      }
+    //      else {
+    //        config["inputs"]["-" + m_optionalParameters[i].verbose];
+    //        config["inputs"][m_optionalParameters[i].verbose]["type"] =
+    //          (m_optionalParameters[i].dataType_string == "STRING") ? "string?" :
+    //          (m_optionalParameters[i].dataType_string == "DIRECTORY") ? "Directory?" :
+    //          (m_optionalParameters[i].dataType_string == "FLOAT") ? "float?" :
+    //          (m_optionalParameters[i].dataType_string == "BOOL") ? "boolean?" :
+    //          (m_optionalParameters[i].dataType_string == "NONE") ? "string?" :
+    //          (m_optionalParameters[i].dataType_string == "UNKNOWN") ? "string?" :
+    //          (m_optionalParameters[i].dataType_string == "INTEGER") ? "int?" :
+    //          (m_optionalParameters[i].dataType_string == "FILE") ? "File?" :
+    //          "string?";
+    //        config["inputs"][m_optionalParameters[i].verbose]["label"] = m_optionalParameters[i].dataRange == "" ? "none" : m_optionalParameters[i].dataRange;
+    //        config["inputs"][m_optionalParameters[i].verbose]["inputBinding"];
+    //        config["inputs"][m_optionalParameters[i].verbose]["inputBinding"]["position"] = 1;
+    //        config["inputs"][m_optionalParameters[i].verbose]["inputBinding"]["prefix"] = "-" + m_optionalParameters[i].laconic;
+    //        config["inputs"][m_optionalParameters[i].verbose]["doc"] =
+    //          (m_optionalParameters[i].descriptionLine1 == "" ? "" : (m_optionalParameters[i].descriptionLine1 + ".")) +
+    //          (m_optionalParameters[i].descriptionLine2 == "" ? "" : (m_optionalParameters[i].descriptionLine2 + ".")) +
+    //          (m_optionalParameters[i].descriptionLine3 == "" ? "" : (m_optionalParameters[i].descriptionLine3 + ".")) +
+    //          (m_optionalParameters[i].descriptionLine4 == "" ? "" : (m_optionalParameters[i].descriptionLine4 + ".")) +
+    //          (m_optionalParameters[i].descriptionLine5 == "" ? "" : (m_optionalParameters[i].descriptionLine5 + "."));
+    //      }
+    //    }
+    //  }
+
+    //  std::ofstream fout(cwlfileName);
+    //  fout << config;
+    //}
 
     return;
   }
 
   std::string CmdParser::GetCommandFromCWL(const std::string &inpDir, const std::string & cwlDir)
   {
-    if (!checkMaxLen)
-    {
-      getMaxLength();
-    }
+    return "";
+    //if (!checkMaxLen)
+    //{
+    //  getMaxLength();
+    //}
 
-    std::string inpDirName_warp, cwlDirName_warp;
+    //std::string inpDirName_warp, cwlDirName_warp;
 
 
-    if (!cbica::directoryExists(inpDir) || (inpDir.empty()))
-    {
-      inpDirName_warp = cbica::makeTempDir();
-    }
-    inpDirName_warp = cbica::stringReplace(inpDir, "\\", "/");
-    if (inpDirName_warp.substr(inpDirName_warp.length() - 1) != "/")
-    {
-      inpDirName_warp += "/";
-    }
+    //if (!cbica::directoryExists(inpDir) || (inpDir.empty()))
+    //{
+    //  inpDirName_warp = cbica::makeTempDir();
+    //}
+    //inpDirName_warp = cbica::stringReplace(inpDir, "\\", "/");
+    //if (inpDirName_warp.substr(inpDirName_warp.length() - 1) != "/")
+    //{
+    //  inpDirName_warp += "/";
+    //}
 
-    //cwl dir
-    if (!cbica::directoryExists(cwlDir) || (cwlDir.empty()))
-    {
-      cwlDirName_warp = cbica::makeTempDir();
-    }
-    cwlDirName_warp = cbica::stringReplace(cwlDir, "\\", "/");
-    if (cwlDirName_warp.substr(cwlDirName_warp.length() - 1) != "/")
-    {
-      cwlDirName_warp += "/";
-    }
+    ////cwl dir
+    //if (!cbica::directoryExists(cwlDir) || (cwlDir.empty()))
+    //{
+    //  cwlDirName_warp = cbica::makeTempDir();
+    //}
+    //cwlDirName_warp = cbica::stringReplace(cwlDir, "\\", "/");
+    //if (cwlDirName_warp.substr(cwlDirName_warp.length() - 1) != "/")
+    //{
+    //  cwlDirName_warp += "/";
+    //}
 
-    std::string inpFileName = inpDirName_warp + m_exeName + ".yml";
-    std::string cwlFileName = cwlDirName_warp + m_exeName + ".cwl";
+    //std::string inpFileName = inpDirName_warp + m_exeName + ".yml";
+    //std::string cwlFileName = cwlDirName_warp + m_exeName + ".cwl";
 
-    YAML::Node input = YAML::LoadFile(inpFileName);
-    YAML::Node config = YAML::LoadFile(cwlFileName);
+    //YAML::Node input = YAML::LoadFile(inpFileName);
+    //YAML::Node config = YAML::LoadFile(cwlFileName);
 
-    std::string cmd = m_exeName;
+    //std::string cmd = m_exeName;
 
-    for (YAML::const_iterator it = input.begin(); it != input.end(); ++it) {
-      std::string key = it->first.as<std::string>();
-      std::string value = it->second.as<std::string>();
+    //for (YAML::const_iterator it = input.begin(); it != input.end(); ++it) {
+    //  std::string key = it->first.as<std::string>();
+    //  std::string value = it->second.as<std::string>();
 
-      std::string laconic = getLaconic(key);
-      if (laconic == "")
-      {
-        std::cerr << "No matching parameter found for '" << key << "'.\n";
-        exit(EXIT_FAILURE);
-      }
+    //  std::string laconic = getLaconic(key);
+    //  if (laconic == "")
+    //  {
+    //    std::cerr << "No matching parameter found for '" << key << "'.\n";
+    //    exit(EXIT_FAILURE);
+    //  }
 
-      if (!input[key]) {
-        if (config["inputs"][key]["default"]) {
-          value = config["inputs"][key]["default"].as<std::string>();
-        }
-        else {
-          std::cerr << "There is no value specified for parameter'" << key << "'Default is also not specified.\n";
-          exit(EXIT_FAILURE);
-        }
-      }
-      cmd += " -" + laconic + " " + value;
-    }
+    //  if (!input[key]) {
+    //    if (config["inputs"][key]["default"]) {
+    //      value = config["inputs"][key]["default"].as<std::string>();
+    //    }
+    //    else {
+    //      std::cerr << "There is no value specified for parameter'" << key << "'Default is also not specified.\n";
+    //      exit(EXIT_FAILURE);
+    //    }
+    //  }
+    //  cmd += " -" + laconic + " " + value;
+    //}
 
-    logCWL(inpFileName, cwlFileName);
-    return cmd;
+    //logCWL(inpFileName, cwlFileName);
+    //return cmd;
   }
 
   void CmdParser::readCWLFile(const std::string &path_to_CWL_File, bool getDescription)
@@ -1364,109 +1365,109 @@ namespace cbica
 
     std::string cwlfileName = dirName_wrap + m_exeName + ".cwl";
 
-    YAML::Node config = YAML::LoadFile(cwlfileName);
+    //YAML::Node config = YAML::LoadFile(cwlfileName);
 
-    std::vector<Parameter> returnVector;
+    //std::vector<Parameter> returnVector;
 
-    if (!config)
-    {
-      std::cerr << "File '" << path_to_CWL_File << "' not found.\n";
-      exit(EXIT_FAILURE);
-    }
-    std::string line;
+    //if (!config)
+    //{
+    //  std::cerr << "File '" << path_to_CWL_File << "' not found.\n";
+    //  exit(EXIT_FAILURE);
+    //}
+    //std::string line;
 
-    std::string parameter, parameterDataType, parameterDataRange, parameterDescription = "";
+    //std::string parameter, parameterDataType, parameterDataRange, parameterDescription = "";
 
-    YAML::Node characterType = config["inputs"];
+    //YAML::Node characterType = config["inputs"];
 
-    bool optional = false;
-    int con = 0;
-    for (YAML::const_iterator it = characterType.begin(); it != characterType.end(); ++it) {
-      std::string key = it->first.as<std::string>();
-      std::string verbose = key;
+    //bool optional = false;
+    //int con = 0;
+    //for (YAML::const_iterator it = characterType.begin(); it != characterType.end(); ++it) {
+    //  std::string key = it->first.as<std::string>();
+    //  std::string verbose = key;
 
-      std::string laconic = config["inputs"][key]["inputBinding"]["prefix"].as<std::string>();
+    //  std::string laconic = config["inputs"][key]["inputBinding"]["prefix"].as<std::string>();
 
-      laconic.erase(std::remove(laconic.begin(), laconic.end(), '-'), laconic.end());
-
-
-      std::string dataRange = config["inputs"][key]["label"].as<std::string>();
-      std::string desc1 = config["inputs"][key]["doc"].as<std::string>();
-
-      std::string dataType = config["inputs"][key]["type"].as<std::string>();
-
-      if (dataType.find('?') != std::string::npos)
-        optional = true;// find
-      else
-        optional = false;// not find
-
-      cbica::Parameter::Type type;
-
-      if (dataType == "File") {
-        type = cbica::Parameter::FILE;
-      }
-      else if (dataType == "Directory")
-      {
-        type = cbica::Parameter::DIRECTORY;
-      }
-      else if (dataType == "string")
-      {
-        type = cbica::Parameter::STRING;
-      }
-      else if (dataType == "int")
-      {
-        type = cbica::Parameter::INTEGER;
-      }
-      else if (dataType == "float")
-      {
-        type = cbica::Parameter::FLOAT;
-      }
-      else if (dataType == "boolean")
-      {
-        type = cbica::Parameter::BOOLEAN;
-      }
-      else {
-        type = cbica::Parameter::NONE;
-      }
+    //  laconic.erase(std::remove(laconic.begin(), laconic.end(), '-'), laconic.end());
 
 
-      if (optional)
-        addOptionalParameter(laconic, verbose, type, dataRange, desc1);
-      else {
-        //std::cout << laconic << verbose << type << dataRange << desc1 << std::endl;
-        addRequiredParameter(laconic, verbose, type, dataRange, desc1);
-      }
+    //  std::string dataRange = config["inputs"][key]["label"].as<std::string>();
+    //  std::string desc1 = config["inputs"][key]["doc"].as<std::string>();
 
-      con++;
-    }
-    exampleUsage("-d C:/here/is/my/Data/ -i fixed,moving -o output");
+    //  std::string dataType = config["inputs"][key]["type"].as<std::string>();
 
-    std::ofstream fout("d:\\Hellow.cwl");
-    fout << config;
+    //  if (dataType.find('?') != std::string::npos)
+    //    optional = true;// find
+    //  else
+    //    optional = false;// not find
+
+    //  cbica::Parameter::Type type;
+
+    //  if (dataType == "File") {
+    //    type = cbica::Parameter::FILE;
+    //  }
+    //  else if (dataType == "Directory")
+    //  {
+    //    type = cbica::Parameter::DIRECTORY;
+    //  }
+    //  else if (dataType == "string")
+    //  {
+    //    type = cbica::Parameter::STRING;
+    //  }
+    //  else if (dataType == "int")
+    //  {
+    //    type = cbica::Parameter::INTEGER;
+    //  }
+    //  else if (dataType == "float")
+    //  {
+    //    type = cbica::Parameter::FLOAT;
+    //  }
+    //  else if (dataType == "boolean")
+    //  {
+    //    type = cbica::Parameter::BOOLEAN;
+    //  }
+    //  else {
+    //    type = cbica::Parameter::NONE;
+    //  }
+
+
+    //  if (optional)
+    //    addOptionalParameter(laconic, verbose, type, dataRange, desc1);
+    //  else {
+    //    //std::cout << laconic << verbose << type << dataRange << desc1 << std::endl;
+    //    addRequiredParameter(laconic, verbose, type, dataRange, desc1);
+    //  }
+
+    //  con++;
+    //}
+    //exampleUsage("-d C:/here/is/my/Data/ -i fixed,moving -o output");
+
+    //std::ofstream fout("d:\\Hellow.cwl");
+    //fout << config;
   }
 
   void CmdParser::createNode(const std::string & nodeString)
   {
-    YAML::Node rootNode;
+ /*   YAML::Node rootNode;
     if (!rootNode)
     {
       std::cerr << "Root node is empty\n";
       exit(EXIT_FAILURE);
     }
 
-    YAML::Node node = rootNode[nodeString];
+    YAML::Node node = rootNode[nodeString];*/
 
     return;
   }
 
   void CmdParser::deleteNode(const std::string & nodeString)
   {
-    YAML::Node parent;
+ /*   YAML::Node parent;
     if (!parent)
     {
       std::cerr << "Root node is empty\n";
       exit(EXIT_FAILURE);
-    }
+    }*/
 
     //parent[nodeString].remove;
     return;
@@ -1474,37 +1475,37 @@ namespace cbica
 
   void CmdParser::addInputs(const std::string & param)
   {
-    YAML::Node rootNode;
+ /*   YAML::Node rootNode;
     if (!rootNode)
     {
       std::cerr << "Root node is empty\n";
       exit(EXIT_FAILURE);
     }
 
-    rootNode["inputs"][param];
+    rootNode["inputs"][param];*/
     return;
   }
 
   void CmdParser::addOutputs(const std::string & param)
   {
-    YAML::Node rootNode;
+   /* YAML::Node rootNode;
     if (!rootNode)
     {
       std::cerr << "Root node is empty\n";
       exit(EXIT_FAILURE);
     }
 
-    rootNode["outputs"][param];
+    rootNode["outputs"][param];*/
     return;
   }
 
   std::string CmdParser::checkDefault(const std::string & param)
   {
+    std::string defaultValue = "";/*
     YAML::Node input;
-    std::string defaultValue = "";
     if (input[param]["default"]) {
       defaultValue = (input[param]["default"]).as<std::string>();;
-    }
+    }*/
     return defaultValue;
   }
 
