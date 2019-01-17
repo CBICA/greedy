@@ -127,7 +127,7 @@ TARGET_LINK_LIBRARIES(greedy greedyapi ${ITK_LIBRARIES} ${FFTWF_LIB} ${FFTWF_THR
 INSTALL(TARGETS greedy DESTINATION bin COMPONENT Runtime)
 
 ADD_EXECUTABLE(greedywrapper src/GreedyWrapper.cxx src/cbicaCmdParser.cpp src/cbicaUtilities.cpp)
-INSTALL(TARGETS GreedyWrapper DESTINATION bin COMPONENT Runtime)
+INSTALL(TARGETS greedywrapper DESTINATION bin COMPONENT Runtime)
 
 ADD_EXECUTABLE(test_accum testing/src/TestOneDimensionalInPlaceAccumulateFilter.cxx)
 TARGET_LINK_LIBRARIES(test_accum ${ITK_LIBRARIES})
