@@ -32,7 +32,7 @@
 #include "itkVectorImage.h"
 #include "itkMatrixOffsetTransformBase.h"
 
-
+#include "MultiComponentMetricReport.h"
 
 /**
  * This class is used to perform mean square intensity difference type
@@ -85,6 +85,9 @@ public:
   /** Set jitter sigma - for jittering image samples in affine mode */
   void SetJitterSigma(double sigma);
 
+  /** Set automatic mask generation radius */
+  void SetGradientMaskTrimRadius(const std::vector<int> &radius);
+
   /** Compute the composite image - must be run before any sampling is done */
   void BuildCompositeImages(double noise_sigma_relative = 0.0);
 
@@ -125,53 +128,58 @@ public:
   const std::vector<double> &GetWeights() const { return m_Weights; }
 
   /** Perform interpolation - compute [(I - J(Tx)) GradJ(Tx)] */
-  vnl_vector<double> ComputeOpticalFlowField(
-      int level, VectorImageType *def, FloatImageType *out_metric,
+  void ComputeOpticalFlowField(
+      int level, VectorImageType *def, FloatImageType *out_metric_image,
+      MultiComponentMetricReport &out_metric_report,
       VectorImageType *out_gradient, double result_scaling = 1.0);
 
   /** Perform interpolation - compute mutual information metric */
-  vnl_vector<double> ComputeMIFlowField(
+  void ComputeMIFlowField(
       int level, bool normalized_mutual_information,
-      VectorImageType *def, FloatImageType *out_metric,
+      VectorImageType *def, FloatImageType *out_metric_image,
+      MultiComponentMetricReport &out_metric_report,
       VectorImageType *out_gradient, double result_scaling = 1.0);
 
   /** Compute the NCC metric without gradient */
-  double ComputeNCCMetricImage(int level, VectorImageType *def, const SizeType &radius,
-                              FloatImageType *out_metric, VectorImageType *out_gradient = NULL,
-                               double result_scaling = 1.0);
+  void ComputeNCCMetricImage(int level, VectorImageType *def, const SizeType &radius,
+                             FloatImageType *out_metric_image, MultiComponentMetricReport &out_metric_report,
+                             VectorImageType *out_gradient = NULL, double result_scaling = 1.0);
 
   /** Compute the Mahalanobis metric with gradient */
-  double ComputeMahalanobisMetricImage(int level, VectorImageType *def, 
-                                       FloatImageType *out_metric, 
-                                       VectorImageType *out_gradient = NULL);
+  void ComputeMahalanobisMetricImage(int level, VectorImageType *def,
+                                     FloatImageType *out_metric_image, MultiComponentMetricReport &out_metric_report,
+                                     VectorImageType *out_gradient = NULL);
 
   /** Compute affine similarity and gradient */
-  double ComputeAffineMSDMatchAndGradient(int level, LinearTransformType *tran,
-                                          FloatImageType *wrkMetric,
-                                          FloatImageType *wrkMask,
-                                          VectorImageType *wrkGradMetric,
-                                          VectorImageType *wrkGradMask,
-                                          VectorImageType *wrkPhi,
-                                          LinearTransformType *grad = NULL);
+  void ComputeAffineMSDMatchAndGradient(int level, LinearTransformType *tran,
+                                        FloatImageType *wrkMetric,
+                                        FloatImageType *wrkMask,
+                                        VectorImageType *wrkGradMetric,
+                                        VectorImageType *wrkGradMask,
+                                        VectorImageType *wrkPhi,
+                                        MultiComponentMetricReport &metrics,
+                                        LinearTransformType *grad = NULL);
 
 
-  double ComputeAffineMIMatchAndGradient(int level, bool normalized_mutual_info,
-                                         LinearTransformType *tran,
-                                         FloatImageType *wrkMetric,
-                                         FloatImageType *wrkMask,
-                                         VectorImageType *wrkGradMetric,
-                                         VectorImageType *wrkGradMask,
-                                         VectorImageType *wrkPhi,
-                                         LinearTransformType *grad = NULL);
+  void ComputeAffineMIMatchAndGradient(int level, bool normalized_mutual_info,
+                                       LinearTransformType *tran,
+                                       FloatImageType *wrkMetric,
+                                       FloatImageType *wrkMask,
+                                       VectorImageType *wrkGradMetric,
+                                       VectorImageType *wrkGradMask,
+                                       VectorImageType *wrkPhi,
+                                       MultiComponentMetricReport &metrics,
+                                       LinearTransformType *grad = NULL);
 
-  double ComputeAffineNCCMatchAndGradient(int level, LinearTransformType *tran,
-                                          const SizeType &radius,
-                                          FloatImageType *wrkMetric,
-                                          FloatImageType *wrkMask,
-                                          VectorImageType *wrkGradMetric,
-                                          VectorImageType *wrkGradMask,
-                                          VectorImageType *wrkPhi,
-                                          LinearTransformType *grad = NULL);
+  void ComputeAffineNCCMatchAndGradient(int level, LinearTransformType *tran,
+                                        const SizeType &radius,
+                                        FloatImageType *wrkMetric,
+                                        FloatImageType *wrkMask,
+                                        VectorImageType *wrkGradMetric,
+                                        VectorImageType *wrkGradMask,
+                                        VectorImageType *wrkPhi,
+                                        MultiComponentMetricReport &metrics,
+                                        LinearTransformType *grad = NULL);
 
   static void AffineToField(LinearTransformType *tran, VectorImageType *def);
 
@@ -254,6 +262,9 @@ protected:
 
   // Amount of jitter - for affine only
   double m_JitterSigma;
+
+  // Gradient mask trim radius
+  std::vector<int> m_GradientMaskTrimRadius;
 
   // Jitter composite
   VectorImageSet m_JitterComposite;

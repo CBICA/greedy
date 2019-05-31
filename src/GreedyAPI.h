@@ -29,11 +29,11 @@
 
 #include "GreedyParameters.h"
 #include "GreedyException.h"
+#include "MultiComponentMetricReport.h"
 #include "lddmm_data.h"
-#include <vnl/vnl_cost_function.h>
+#include "AffineCostFunctions.h"
 #include <vnl/vnl_random.h>
 #include <map>
-
 #include "itkCommand.h"
 
 template <typename T, unsigned int V> class MultiImageOpticalFlowHelper;
@@ -66,7 +66,7 @@ public:
   typedef vnl_vector_fixed<TReal, VDim> VecFx;
   typedef vnl_matrix_fixed<TReal, VDim, VDim> MatFx;
 
-  typedef std::vector<std::vector<double> > MetricLogType;
+  typedef std::vector< std::vector<MultiComponentMetricReport> > MetricLogType;
 
   typedef MultiImageOpticalFlowHelper<TReal, VDim> OFHelperType;
 
@@ -78,6 +78,7 @@ public:
     double weight;
   };
 
+  static void ConfigThreads(const GreedyParameters &param);
 
   int Run(GreedyParameters &param);
 
@@ -124,7 +125,16 @@ public:
    * so it's the caller's responsibility to keep the object pointed to while
    * the API is being used.
    */
-  void AddCachedInputObject(std::string &string, itk::Object *object);
+  void AddCachedInputObject(std::string key, itk::Object *object);
+
+  /**
+   * Add an image/matrix to the output cache. This has the same behavior as
+   * the input cache, but there is an additional flag as to whether you want
+   * to save the output object to the specified filename in addition to writing
+   * it to the cached image/matrix. This allows you to both store the result in
+   * the cache and write it to a filename specified in the key
+   */
+  void AddCachedOutputObject(std::string key, itk::Object *object, bool force_write = false);
 
   /**
    * Get the metric log - values of metric per level. Can be called from
@@ -132,32 +142,16 @@ public:
    */
   const MetricLogType &GetMetricLog() const;
 
-
-
-protected:
-
-  typedef std::map<std::string, itk::Object *> ImageCache;
-  ImageCache m_ImageCache;
-
-  // A log of metric values used during registration - so metric can be looked up
-  // in the callbacks to RunAffine, etc.
-  std::vector< std::vector<double> > m_MetricLog;
-
-  // This function reads the image from disk, or from a memory location mapped to a
-  // string. The first approach is used by the command-line interface, and the second
-  // approach is used by the API, allowing images to be passed from other software
-  template <class TImage>
-  itk::SmartPointer<TImage> ReadImageViaCache(const std::string &filename);
+  /** Get the last value of the metric recorded */
+  MultiComponentMetricReport GetLastMetricReport() const;
 
   vnl_matrix<double> ReadAffineMatrixViaCache(const TransformSpec &ts);
 
   void WriteAffineMatrixViaCache(const std::string &filename, const vnl_matrix<double> &Qp);
 
-  void ReadImages(GreedyParameters &param, OFHelperType &ofhelper);
+  static vnl_matrix<double> ReadAffineMatrix(const TransformSpec &ts);
 
-  void ReadTransformChain(const std::vector<TransformSpec> &tran_chain,
-                          ImageBaseType *ref_space,
-                          VectorImagePointer &out_warp);
+  static void WriteAffineMatrix(const std::string &filename, const vnl_matrix<double> &Qp);
 
   static vnl_matrix<double> MapAffineToPhysicalRASSpace(
       OFHelperType &of_helper, int level,
@@ -168,154 +162,72 @@ protected:
       vnl_matrix<double> &Qp,
       LinearTransformType *tran);
 
-  void RecordMetricValue(double val);
+  void RecordMetricValue(const MultiComponentMetricReport &metric);
+
+  // Helper method to print iteration reports
+  std::string PrintIter(int level, int iter, const MultiComponentMetricReport &metric) const;
+
+protected:
+
+  struct CacheEntry {
+    itk::Object *target;
+    bool force_write;
+  };
+
+  typedef std::map<std::string, CacheEntry> ImageCache;
+  ImageCache m_ImageCache;
+
+  // A log of metric values used during registration - so metric can be looked up
+  // in the callbacks to RunAffine, etc.
+  MetricLogType m_MetricLog;
+
+  // This function reads the image from disk, or from a memory location mapped to a
+  // string. The first approach is used by the command-line interface, and the second
+  // approach is used by the API, allowing images to be passed from other software.
+  // An optional second argument is used to store the component type, but only if
+  // the image is actually loaded from disk. For cached images, the component type
+  // will be unknown.
+  template <class TImage>
+  itk::SmartPointer<TImage> ReadImageViaCache(const std::string &filename,
+                                              itk::ImageIOBase::IOComponentType *comp_type = NULL);
+
+  // This function reads an image base object via cache. It is more permissive than using
+  // ReadImageViaCache.
+  typename ImageBaseType::Pointer ReadImageBaseViaCache(const std::string &filename);
+
+
+  // Write an image using the cache
+  template <class TImage>
+  void WriteImageViaCache(TImage *img, const std::string &filename,
+                          typename LDDMMType::IOComponentType comp = itk::ImageIOBase::UNKNOWNCOMPONENTTYPE);
+
+  void ReadImages(GreedyParameters &param, OFHelperType &ofhelper);
+
+  void ReadTransformChain(const std::vector<TransformSpec> &tran_chain,
+                          ImageBaseType *ref_space,
+                          VectorImagePointer &out_warp);
 
   // Compute the moments of a composite image (mean and covariance matrix of coordinate weighted by intensity)
   void ComputeImageMoments(CompositeImageType *image, const std::vector<double> &weights, VecFx &m1, MatFx &m2);
 
-  class AbstractAffineCostFunction : public vnl_cost_function
-  {
-  public:
 
-    AbstractAffineCostFunction(int n_unknowns) : vnl_cost_function(n_unknowns) {}
-    virtual vnl_vector<double> GetCoefficients(LinearTransformType *tran) = 0;
-    virtual void GetTransform(const vnl_vector<double> &coeff, LinearTransformType *tran) = 0;
-    virtual void compute(vnl_vector<double> const& x, double *f, vnl_vector<double>* g) = 0;
-  };
 
-  /**
-   * Pure affine cost function - parameters are elements of N x N matrix M.
-   * Transformation takes place in voxel coordinates - not physical coordinates (for speed)
-   */
-  class PureAffineCostFunction : public AbstractAffineCostFunction
-  {
-  public:
-
-    typedef GreedyApproach<VDim, TReal> ParentType;
-
-    // Construct the function
-    PureAffineCostFunction(GreedyParameters *param, ParentType *parent, int level, OFHelperType *helper);
-
-    // Get the parameters for the specified initial transform
-    vnl_vector<double> GetCoefficients(LinearTransformType *tran);
-
-    // Get the transform for the specificed coefficients
-    void GetTransform(const vnl_vector<double> &coeff, LinearTransformType *tran);
-
-    // Get the preferred scaling for this function given image dimensions
-    virtual vnl_vector<double> GetOptimalParameterScaling(const itk::Size<VDim> &image_dim);
-
-    // Cost function computation
-    virtual void compute(vnl_vector<double> const& x, double *f, vnl_vector<double>* g);
-
-  protected:
-
-    // Data needed to compute the cost function
-    GreedyParameters *m_Param;
-    OFHelperType *m_OFHelper;
-    GreedyApproach<VDim, TReal> *m_Parent;
-    bool m_Allocated;
-    int m_Level;
-
-    // Storage for the gradient of the similarity map
-    VectorImagePointer m_Phi, m_GradMetric, m_GradMask;
-    ImagePointer m_Metric, m_Mask;
-
-    // Last set of coefficients evaluated
-    vnl_vector<double> last_coeff;
-  };
-
-  /**
-   * Physical space affine cost function - parameters are elements of affine transform in
-   * physical RAS space.
-   */
-  class PhysicalSpaceAffineCostFunction : public AbstractAffineCostFunction
-  {
-  public:
-    typedef GreedyApproach<VDim, TReal> ParentType;
-
-    PhysicalSpaceAffineCostFunction(GreedyParameters *param, ParentType *parent, int level, OFHelperType *helper);
-    virtual vnl_vector<double> GetCoefficients(LinearTransformType *tran);
-    virtual void GetTransform(const vnl_vector<double> &coeff, LinearTransformType *tran);
-    virtual void compute(vnl_vector<double> const& x, double *f, vnl_vector<double>* g);
-    virtual vnl_vector<double> GetOptimalParameterScaling(const itk::Size<VDim> &image_dim);
-
-    void map_phys_to_vox(const vnl_vector<double> &x_phys, vnl_vector<double> &x_vox);
-
-  protected:
-    PureAffineCostFunction m_PureFunction;
-
-    // Voxel to physical transforms for fixed, moving image
-    typedef vnl_matrix_fixed<double, VDim, VDim> Mat;
-    typedef vnl_vector_fixed<double, VDim> Vec;
-
-    Mat Q_fix, Q_mov, Q_fix_inv, Q_mov_inv;
-    Vec b_fix, b_mov, b_fix_inv, b_mov_inv;
-
-    vnl_matrix<double> J_phys_vox;
-  };
-
-  /** Abstract scaling cost function - wraps around another cost function and provides scaling */
-  class ScalingCostFunction : public AbstractAffineCostFunction
-  {
-  public:
-
-    // Construct the function
-    ScalingCostFunction(AbstractAffineCostFunction *pure_function, const vnl_vector<double> &scaling)
-      : AbstractAffineCostFunction(pure_function->get_number_of_unknowns()),
-        m_PureFunction(pure_function), m_Scaling(scaling) {}
-
-    // Get the parameters for the specified initial transform
-    vnl_vector<double> GetCoefficients(LinearTransformType *tran);
-
-    // Get the transform for the specificed coefficients
-    void GetTransform(const vnl_vector<double> &coeff, LinearTransformType *tran);
-
-    // Cost function computation
-    virtual void compute(vnl_vector<double> const& x, double *f, vnl_vector<double>* g);
-
-    const vnl_vector<double> &GetScaling() { return m_Scaling; }
-
-  protected:
-
-    // Data needed to compute the cost function
-    AbstractAffineCostFunction *m_PureFunction;
-    vnl_vector<double> m_Scaling;
-  };
-
-  /** Cost function for rigid registration */
-  class RigidCostFunction : public AbstractAffineCostFunction
-  {
-  public:
-    typedef vnl_vector_fixed<double, VDim> Vec3;
-    typedef vnl_matrix_fixed<double, VDim, VDim> Mat3;
-    typedef GreedyApproach<VDim, TReal> ParentType;
-
-    RigidCostFunction(GreedyParameters *param, ParentType *parent, int level, OFHelperType *helper);
-    vnl_vector<double> GetCoefficients(LinearTransformType *tran);
-    void GetTransform(const vnl_vector<double> &coeff, LinearTransformType *tran);
-    virtual void compute(vnl_vector<double> const& x, double *f, vnl_vector<double>* g);
-
-    // Get the preferred scaling for this function given image dimensions
-    virtual vnl_vector<double> GetOptimalParameterScaling(const itk::Size<VDim> &image_dim);
-
-    // Create a random set of parameters, such that on average point C_fixed maps to point C_mov
-    vnl_vector<double> GetRandomCoeff(const vnl_vector<double> &xInit, vnl_random &randy, double sigma_angle, double sigma_xyz,
-                                     const Vec3 &C_fixed, const Vec3 &C_moving);
-
-  protected:
-
-    Mat3 GetRotationMatrix(const Vec3 &q);
-    Vec3 GetAxisAngle(const Mat3 &R);
-
-    // We wrap around a physical space affine function, since rigid in physical space is not
-    // the same as rigid in voxel space
-    PhysicalSpaceAffineCostFunction m_AffineFn;
-
-  };
-
-  friend class GreedyApproach<VDim, TReal>::PureAffineCostFunction;
+  // friend class PureAffineCostFunction<VDim, TReal>;
 
 };
+
+// Little helper functions
+template <unsigned int VDim> class array_caster
+{
+public:
+  template <class T> static itk::Size<VDim> to_itkSize(const T &t)
+  {
+    itk::Size<VDim> sz;
+    for(int i = 0; i < VDim; i++)
+      sz[i] = t[i];
+    return sz;
+  }
+};
+
 
 #endif // GREEDYAPI_H

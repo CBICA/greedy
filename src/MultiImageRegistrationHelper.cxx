@@ -82,6 +82,17 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   m_JitterSigma = sigma;
 }
 
+template<class TFloat, unsigned int VDim>
+void
+MultiImageOpticalFlowHelper<TFloat, VDim>
+::SetGradientMaskTrimRadius(const std::vector<int> &radius)
+{
+  if(radius.size() != VDim)
+    throw GreedyException("Gradien mask trim radius parameter has incorrect dimension");
+
+  m_GradientMaskTrimRadius = radius;
+}
+
 template <class TFloat, unsigned int VDim>
 void
 MultiImageOpticalFlowHelper<TFloat, VDim>
@@ -143,8 +154,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
       LDDMMType::img_threshold_in_place(m_GradientMaskComposite[level], 0.5, 1e100, 0.5, 0);
 
       // Make a copy of the mask
-      typename FloatImageType::Pointer mask_copy;
-      LDDMMType::alloc_img(mask_copy, m_GradientMaskComposite[level]);
+      typename FloatImageType::Pointer mask_copy = LDDMMType::new_img(m_GradientMaskComposite[level]);
       LDDMMType::img_copy(m_GradientMaskComposite[level], mask_copy);
 
       // Run the accumulation filter on the mask
@@ -257,8 +267,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
           }
 
         // Compute the gradient of the moving image
-        //typename VectorImageType::Pointer gradMoving = VectorImageType::New();
-        //LDDMMType::alloc_vimg(gradMoving, lMoving);
+        //typename VectorImageType::Pointer gradMoving = LDDMMType::new_vimg(lMoving);
         //LDDMMType::image_gradient(lMoving, gradMoving);
 
         // Allocate the composite images if they have not been allocated
@@ -307,6 +316,36 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
         LDDMMType::img_downsample(m_GradientMaskImage, m_GradientMaskComposite[i], m_PyramidFactors[i]);
         LDDMMType::img_threshold_in_place(m_GradientMaskComposite[i], 0.5, 1e100, 1.0, 0.0);
         }      
+      }
+    }
+  else if(m_GradientMaskTrimRadius.size() > 0)
+    {
+    // User wants auto-generated box masks. Create them for every pyramid level
+    for(int i = 0; i < m_PyramidFactors.size(); i++)
+      {
+      // Allocate the image
+      m_GradientMaskComposite[i] = LDDMMType::new_img(m_FixedComposite[i]);
+
+      // Fill out the image
+      itk::Size<VDim> sz = m_GradientMaskComposite[i]->GetBufferedRegion().GetSize();
+
+      typedef itk::ImageRegionIteratorWithIndex<FloatImageType> IterType;
+      for(IterType it(m_GradientMaskComposite[i], m_GradientMaskComposite[i]->GetBufferedRegion());
+          !it.IsAtEnd(); ++it)
+        {
+        TFloat mask_val = 1.0;
+        for(unsigned int d = 0; d < VDim; d++)
+          {
+          if(it.GetIndex()[d] < m_GradientMaskTrimRadius[d]
+             || sz[d] - it.GetIndex()[d] <= m_GradientMaskTrimRadius[d])
+            {
+            mask_val = 0.0;
+            break;
+            }
+          }
+
+        it.Set(mask_val);
+        }
       }
     }
 
@@ -397,11 +436,12 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
 }
 
 template <class TFloat, unsigned int VDim>
-vnl_vector<double>
+void
 MultiImageOpticalFlowHelper<TFloat, VDim>
 ::ComputeOpticalFlowField(int level,
                           VectorImageType *def,
-                          FloatImageType *out_metric,
+                          FloatImageType *out_metric_image,
+                          MultiComponentMetricReport &out_metric_report,
                           VectorImageType *out_gradient,
                           double result_scaling)
 {
@@ -421,21 +461,23 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   filter->SetDeformationField(def);
   filter->SetWeights(wscaled);
   filter->SetComputeGradient(true);
-  filter->GetMetricOutput()->Graft(out_metric);
+  filter->GetMetricOutput()->Graft(out_metric_image);
   filter->GetDeformationGradientOutput()->Graft(out_gradient);
   filter->Update();
 
-  // Get the vector of the normalized metrics
-  return filter->GetAllMetricValues();
+  // Process the results
+  out_metric_report.ComponentMetrics = filter->GetAllMetricValues();
+  out_metric_report.TotalMetric = filter->GetMetricValue();
 }
 
 template <class TFloat, unsigned int VDim>
-vnl_vector<double>
+void
 MultiImageOpticalFlowHelper<TFloat, VDim>
 ::ComputeMIFlowField(int level,
                      bool normalized_mutual_information,
                      VectorImageType *def,
-                     FloatImageType *out_metric,
+                     FloatImageType *out_metric_image,
+                     MultiComponentMetricReport &out_metric_report,
                      VectorImageType *out_gradient,
                      double result_scaling)
 {
@@ -485,14 +527,15 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   metric->SetDeformationField(def);
   metric->SetWeights(wscaled);
   metric->SetComputeGradient(true);
-  metric->GetMetricOutput()->Graft(out_metric);
+  metric->GetMetricOutput()->Graft(out_metric_image);
   metric->GetDeformationGradientOutput()->Graft(out_gradient);
-  metric->GetMetricOutput()->Graft(out_metric);
+  metric->GetMetricOutput()->Graft(out_metric_image);
   metric->SetBins(128);
   metric->Update();
 
   // Process the results
-  return metric->GetAllMetricValues();
+  out_metric_report.ComponentMetrics = metric->GetAllMetricValues();
+  out_metric_report.TotalMetric = metric->GetMetricValue();
 }
 
 // #undef DUMP_NCC
@@ -523,12 +566,13 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
 }
 
 template <class TFloat, unsigned int VDim>
-double
+void
 MultiImageOpticalFlowHelper<TFloat, VDim>
 ::ComputeNCCMetricImage(int level,
                         VectorImageType *def,
                         const SizeType &radius,
-                        FloatImageType *out_metric,
+                        FloatImageType *out_metric_image,
+                        MultiComponentMetricReport &out_metric_report,
                         VectorImageType *out_gradient,
                         double result_scaling)
 {
@@ -560,7 +604,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   filter->SetDeformationField(def);
   filter->SetWeights(wscaled);
   filter->SetComputeGradient(true);
-  filter->GetMetricOutput()->Graft(out_metric);
+  filter->GetMetricOutput()->Graft(out_metric_image);
   filter->GetDeformationGradientOutput()->Graft(out_gradient);
   filter->SetRadius(radius_fix);
   filter->SetWorkingImage(m_NCCWorkingImage);
@@ -572,14 +616,15 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   filter->Update();
 
   // Get the vector of the normalized metrics
-  return filter->GetMetricValue();
+  out_metric_report.ComponentMetrics = filter->GetAllMetricValues();
+  out_metric_report.TotalMetric = filter->GetMetricValue();
 }
 
 template <class TFloat, unsigned int VDim>
-double
+void
 MultiImageOpticalFlowHelper<TFloat, VDim>
 ::ComputeMahalanobisMetricImage(int level, VectorImageType *def, 
-  FloatImageType *out_metric, 
+  FloatImageType *out_metric_image, MultiComponentMetricReport &out_metric_report,
   VectorImageType *out_gradient)
 {
   typedef DefaultMahalanobisDistanceToTargetMetricTraits<TFloat, VDim> TraitsType;
@@ -590,18 +635,19 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   filter->SetMovingImage(m_MovingComposite[level]);
   filter->SetDeformationField(def);
   filter->SetComputeGradient(true);
-  filter->GetMetricOutput()->Graft(out_metric);
+  filter->GetMetricOutput()->Graft(out_metric_image);
   filter->GetDeformationGradientOutput()->Graft(out_gradient);
   filter->SetFixedMaskImage(m_GradientMaskComposite[level]);
 
   filter->Update();
 
-  return filter->GetMetricValue();
+  out_metric_report.ComponentMetrics = filter->GetAllMetricValues();
+  out_metric_report.TotalMetric = filter->GetMetricValue();
 }
 
 
 template <class TFloat, unsigned int VDim>
-double
+void
 MultiImageOpticalFlowHelper<TFloat, VDim>
 ::ComputeAffineMSDMatchAndGradient(int level,
     LinearTransformType *tran,
@@ -610,6 +656,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
     VectorImageType *wrkGradMetric,
     VectorImageType *wrkGradMask,
     VectorImageType *wrkPhi,
+    MultiComponentMetricReport &out_metric,
     LinearTransformType *grad)
 {
   // Scale the weights by epsilon
@@ -651,13 +698,14 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
     grad->SetOffset(metric->GetAffineTransformGradient()->GetOffset());
     }
 
-  return metric->GetMetricValue();
+  out_metric.TotalMetric = metric->GetMetricValue();
+  out_metric.ComponentMetrics = metric->GetAllMetricValues();
 }
 
 #include "itkRescaleIntensityImageFilter.h"
 
 template <class TFloat, unsigned int VDim>
-double
+void
 MultiImageOpticalFlowHelper<TFloat, VDim>
 ::ComputeAffineMIMatchAndGradient(int level,
                                   bool normalized_mutual_info,
@@ -667,6 +715,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
                                   VectorImageType *wrkGradMetric,
                                   VectorImageType *wrkGradMask,
                                   VectorImageType *wrkPhi,
+                                  MultiComponentMetricReport &out_metric,
                                   LinearTransformType *grad)
 {
   // Scale the weights by epsilon
@@ -728,14 +777,15 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
     grad->SetOffset(metric->GetAffineTransformGradient()->GetOffset());
     }
 
-  return metric->GetMetricValue();
+  out_metric.TotalMetric = metric->GetMetricValue();
+  out_metric.ComponentMetrics = metric->GetAllMetricValues();
 }
 
 
 
 // TODO: there is a lot of code duplication here!
 template <class TFloat, unsigned int VDim>
-double
+void
 MultiImageOpticalFlowHelper<TFloat, VDim>
 ::ComputeAffineNCCMatchAndGradient(int level,
                                    LinearTransformType *tran,
@@ -745,6 +795,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
                                    VectorImageType *wrkGradMetric,
                                    VectorImageType *wrkGradMask,
                                    VectorImageType *wrkPhi,
+                                   MultiComponentMetricReport &out_metric,
                                    LinearTransformType *grad)
 {
   // Scale the weights by epsilon
@@ -789,88 +840,8 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
     grad->SetOffset(metric->GetAffineTransformGradient()->GetOffset());
     }
 
-  return metric->GetMetricValue();
-
-
-  /*
-  // Scale the weights by epsilon
-  vnl_vector<float> wscaled(m_Weights.size());
-  for(int i = 0; i < wscaled.size(); i++)
-    wscaled[i] = m_Weights[i];
-
-  // Create a deformation field from the affine transform
-  typedef LinearTransformToWarpFilter<
-      MultiComponentImageType, VectorImageType, LinearTransformType> WarpFilter;
-  typename WarpFilter::Pointer warp_source = WarpFilter::New();
-  warp_source->SetInput(m_FixedComposite[level]);
-  warp_source->SetTransform(tran);
-  warp_source->GraftOutput(wrkPhi);
-
-  // Allocate a working image
-  if(m_NCCWorkingImage.IsNull())
-    m_NCCWorkingImage = MultiComponentImageType::New();
-
-  // Set up the optical flow computation
-  typedef DefaultMultiComponentImageMetricTraits<TFloat, VDim> TraitsType;
-  typedef MultiComponentNCCImageMetric<TraitsType> MetricType;
-  typename MetricType::Pointer metric = MetricType::New();
-
-  metric->SetWorkingImage(m_NCCWorkingImage);
-  metric->SetRadius(radius);
-
-  metric->SetFixedImage(m_FixedComposite[level]);
-  metric->SetMovingImage(m_MovingComposite[level]);
-  metric->SetWeights(wscaled);
-  metric->SetDeformationField(warp_source->GetOutput());
-
-  metric->GetMetricOutput()->Graft(wrkMetric);
-
-  metric->SetComputeMovingDomainMask(true);
-  metric->GetMovingDomainMaskOutput()->Graft(wrkMask);
-
-  if(grad)
-    {
-    metric->SetComputeGradient(true);
-    metric->GetGradientOutput()->Graft(wrkGradMetric);
-    metric->GetMovingDomainMaskGradientOutput()->Graft(wrkGradMask);
-    }
-
-  // Use finite differences
-  typedef MultiImageAffineMetricFilter<TraitsType> AffineMetricType;
-  typename AffineMetricType::Pointer affine_metric = AffineMetricType::New();
-
-  // Run the filter
-  affine_metric->SetMetricImage(metric->GetMetricOutput());
-  affine_metric->SetMovingDomainMaskImage(metric->GetMovingDomainMaskOutput());
-
-  // TODO: only if gradient!
-  if(grad)
-    {
-    affine_metric->SetComputeGradient(true);
-    affine_metric->SetGradientImage(metric->GetGradientOutput());
-    affine_metric->SetMovingDomainMaskGradientImage(metric->GetMovingDomainMaskGradientOutput());
-    affine_metric->SetGradientScalingFactor(metric->GetGradientScalingFactor());
-    }
-
-  affine_metric->Update();
-
-  // Process the results
-  if(grad)
-    {
-    grad->SetMatrix(affine_metric->GetMetricGradient()->GetMatrix());
-    grad->SetOffset(affine_metric->GetMetricGradient()->GetOffset());
-    }
-
-  // / *
-  // LDDMMData<TFloat, VDim>::img_write(wrkMetric, "dump_metric.nii.gz");
-  // LDDMMData<TFloat, VDim>::img_write(wrkMask, "dump_mask.nii.gz");
-  // LDDMMData<TFloat, VDim>::vimg_write(wrkGradMetric, "dump_grad_metric.nii.gz");
-  // LDDMMData<TFloat, VDim>::vimg_write(wrkGradMask, "dump_grad_mask.nii.gz");
-  // exit(-1);
-  // * /
-
-  return affine_metric->GetMetricValue();
-*/
+  out_metric.TotalMetric = metric->GetMetricValue();
+  out_metric.ComponentMetrics = metric->GetAllMetricValues();
 }
 
 template <class TFloat, unsigned int VDim>
@@ -1253,20 +1224,17 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
     }
 
   // Create the current root and the next root
-  VectorImagePointer u = VectorImageType::New();
-  LDDMMType::alloc_vimg(u, warp);
+  VectorImagePointer u = LDDMMType::new_vimg(warp);
   LDDMMType::vimg_copy(warp, u);
 
   // Create a working image
-  VectorImagePointer work = VectorImageType::New();
-  LDDMMType::alloc_vimg(work, warp);
+  VectorImagePointer work = LDDMMType::new_vimg(warp);
 
   // If there is tolerance, create an error norm image
   FloatImagePointer error_norm;
   if(tol > 0.0)
     {
-    error_norm = FloatImageType::New();
-    LDDMMType::alloc_img(error_norm, warp);
+    error_norm = LDDMMType::new_img(warp);
     }
     
   // Compute the square root 'exponent' times
@@ -1292,13 +1260,11 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   typedef LDDMMData<TFloat, VDim> LDDMMType;
 
   // Create a copy of the forward warp
-  VectorImagePointer uForward = VectorImageType::New();
-  LDDMMType::alloc_vimg(uForward, warp);
+  VectorImagePointer uForward = LDDMMType::new_vimg(warp);
   LDDMMType::vimg_copy(warp, uForward);
 
   // Create a working image 
-  VectorImagePointer uWork = VectorImageType::New();
-  LDDMMType::alloc_vimg(uWork, warp);
+  VectorImagePointer uWork = LDDMMType::new_vimg(warp);
 
   // Take the desired square root of the input warp and place into uForward
   ComputeWarpRoot(warp, uForward, n_sqrt);
@@ -1331,8 +1297,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   // If verbose, compute the maximum error
   if(verbose)
     {
-    FloatImagePointer iNorm = FloatImageType::New();
-    LDDMMType::alloc_img(iNorm, uWork);
+    FloatImagePointer iNorm = LDDMMType::new_img(uWork);
     LDDMMType::interp_vimg(uInverse, uForward, 1.0, uWork);
     LDDMMType::vimg_add_in_place(uWork, uForward);
     TFloat norm_min, norm_max;

@@ -41,6 +41,7 @@
 #include <itkTransformFactory.h>
 #include <itkTimeProbe.h>
 #include <itkImageFileWriter.h>
+#include <itkCastImageFilter.h>
 
 #include "MultiImageRegistrationHelper.h"
 #include "FastWarpCompositeImageFilter.h"
@@ -52,103 +53,9 @@
 #include <vnl/vnl_trace.h>
 #include <vnl/vnl_numeric_traits.h>
 
-// Little helper functions
-template <unsigned int VDim> class array_caster
-{
-public:
-  template <class T> static itk::Size<VDim> to_itkSize(const T &t)
-  {
-    itk::Size<VDim> sz;
-    for(int i = 0; i < VDim; i++)
-      sz[i] = t[i];
-    return sz;
-  }
-};
 
-template <class TITKMatrix, class TVNLMatrix>
-void vnl_matrix_to_itk_matrix(
-    const TVNLMatrix &vmat,
-    TITKMatrix &imat)
-{
-  for(int r = 0; r < TITKMatrix::RowDimensions; r++)
-    for(int c = 0; c < TITKMatrix::ColumnDimensions; c++)
-      imat(r,c) = static_cast<typename TITKMatrix::ValueType>(vmat(r,c));
-}
 
-template <class TITKVector, class TVNLVector>
-void vnl_vector_to_itk_vector(
-    const TVNLVector &vvec,
-    TITKVector &ivec)
-{
-  for(int r = 0; r < TITKVector::Dimension; r++)
-    ivec[r] = static_cast<typename TITKVector::ValueType>(vvec(r));
-}
 
-template <class TITKMatrix, class TVNL>
-void itk_matrix_to_vnl_matrix(
-    const TITKMatrix &imat,
-    vnl_matrix_fixed<TVNL,TITKMatrix::RowDimensions,TITKMatrix::ColumnDimensions>  &vmat)
-{
-  for(int r = 0; r < TITKMatrix::RowDimensions; r++)
-    for(int c = 0; c < TITKMatrix::ColumnDimensions; c++)
-      vmat(r,c) = static_cast<TVNL>(imat(r,c));
-}
-
-template <class TITKMatrix, class TVNL>
-void itk_matrix_to_vnl_matrix(
-    const TITKMatrix &imat,
-    vnl_matrix<TVNL>  &vmat)
-{
-  vmat.set_size(TITKMatrix::RowDimensions,TITKMatrix::ColumnDimensions);
-  for(int r = 0; r < TITKMatrix::RowDimensions; r++)
-    for(int c = 0; c < TITKMatrix::ColumnDimensions; c++)
-      vmat(r,c) = static_cast<TVNL>(imat(r,c));
-}
-
-template <class TITKVector, class TVNL>
-void itk_vector_to_vnl_vector(
-    const TITKVector &ivec,
-    vnl_vector_fixed<TVNL,TITKVector::Dimension> &vvec)
-{
-  for(int r = 0; r < TITKVector::Dimension; r++)
-    vvec(r) = static_cast<TVNL>(ivec[r]);
-}
-
-template <class TITKVector, class TVNL>
-void itk_vector_to_vnl_vector(
-    const TITKVector &ivec,
-    vnl_vector<TVNL> &vvec)
-{
-  vvec.set_size(TITKVector::Dimension);
-  for(int r = 0; r < TITKVector::Dimension; r++)
-    vvec(r) = static_cast<TVNL>(ivec[r]);
-}
-
-// Helper function to map from ITK coordiante space to RAS space
-template<unsigned int VDim, class TMat, class TVec>
-void
-GetVoxelSpaceToNiftiSpaceTransform(itk::ImageBase<VDim> *image,
-                                   TMat &A,
-                                   TVec &b)
-{
-  // Generate intermediate terms
-  typedef typename TMat::element_type TReal;
-  vnl_matrix<double> m_dir, m_ras_matrix;
-  vnl_diag_matrix<double> m_scale, m_lps_to_ras;
-  vnl_vector<double> v_origin, v_ras_offset;
-
-  // Compute the matrix
-  m_dir = image->GetDirection().GetVnlMatrix();
-  m_scale.set(image->GetSpacing().GetVnlVector());
-  m_lps_to_ras.set(vnl_vector<double>(VDim, 1.0));
-  m_lps_to_ras[0] = -1;
-  m_lps_to_ras[1] = -1;
-  A = m_lps_to_ras * m_dir * m_scale;
-
-  // Compute the vector
-  v_origin = image->GetOrigin().GetVnlVector();
-  b = m_lps_to_ras * v_origin;
-}
 
 // Helper function to get the RAS coordinate of the center of 
 // an image
@@ -172,726 +79,6 @@ GetImageCenterinNiftiSpace(itk::ImageBase<VDim> *image)
 
 
 
-template <unsigned int VDim, typename TReal>
-GreedyApproach<VDim, TReal>::PureAffineCostFunction
-::PureAffineCostFunction(GreedyParameters *param, ParentType *parent, int level, OFHelperType *helper)
-  : AbstractAffineCostFunction(VDim * (VDim + 1))
-{
-  // Store the data
-  m_Param = param;
-  m_OFHelper = helper;
-  m_Level = level;
-  m_Parent = parent;
-
-  // Allocate the working images, but do not allocate. We will allocate on demand because
-  // these affine cost functions may be created without needing to do any computation
-  m_Allocated = false;
-
-  m_Phi = VectorImageType::New();
-  m_Phi->CopyInformation(helper->GetReferenceSpace(level));
-  m_Phi->SetRegions(helper->GetReferenceSpace(level)->GetBufferedRegion());
-
-  m_GradMetric = VectorImageType::New();
-  m_GradMetric->CopyInformation(helper->GetReferenceSpace(level));
-  m_GradMetric->SetRegions(helper->GetReferenceSpace(level)->GetBufferedRegion());
-
-  m_GradMask = VectorImageType::New();
-  m_GradMask->CopyInformation(helper->GetReferenceSpace(level));
-  m_GradMask->SetRegions(helper->GetReferenceSpace(level)->GetBufferedRegion());
-
-  m_Metric = ImageType::New();
-  m_Metric->CopyInformation(helper->GetReferenceSpace(level));
-  m_Metric->SetRegions(helper->GetReferenceSpace(level)->GetBufferedRegion());
-
-  m_Mask = ImageType::New();
-  m_Mask->CopyInformation(helper->GetReferenceSpace(level));
-  m_Mask->SetRegions(helper->GetReferenceSpace(level)->GetBufferedRegion());
-}
-
-
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::PureAffineCostFunction
-::compute(const vnl_vector<double> &x, double *f, vnl_vector<double> *g)
-{
-  // Form a matrix/vector from x
-  typename LinearTransformType::Pointer tran = LinearTransformType::New();
-
-  // Set the components of the transform
-  unflatten_affine_transform(x.data_block(), tran.GetPointer());
-
-  // Allocate the memory if needed
-  if(!m_Allocated)
-    {
-    m_Phi->Allocate();
-    m_GradMetric->Allocate();
-    m_GradMask->Allocate();
-    m_Metric->Allocate();
-    m_Mask->Allocate();
-    m_Allocated = true;
-    }
-
-  // Compute the gradient
-  double val = 0.0;
-  if(g)
-    {
-    typename LinearTransformType::Pointer grad = LinearTransformType::New();
-
-    if(m_Param->metric == GreedyParameters::SSD)
-      {
-      val = m_OFHelper->ComputeAffineMSDMatchAndGradient(
-              m_Level, tran, m_Metric, m_Mask, m_GradMetric, m_GradMask, m_Phi, grad);
-
-      flatten_affine_transform(grad.GetPointer(), g->data_block());
-      }
-    else if(m_Param->metric == GreedyParameters::NCC)
-      {
-
-      val = m_OFHelper->ComputeAffineNCCMatchAndGradient(
-              m_Level, tran, array_caster<VDim>::to_itkSize(m_Param->metric_radius),
-              m_Metric, m_Mask, m_GradMetric, m_GradMask, m_Phi, grad);
-
-      flatten_affine_transform(grad.GetPointer(), g->data_block());
-
-      // NCC should be maximized
-      (*g) *= -10000.0;
-      val *= -10000.0;
-      }
-    else if(m_Param->metric == GreedyParameters::MI || m_Param->metric == GreedyParameters::NMI)
-      {
-      val = m_OFHelper->ComputeAffineMIMatchAndGradient(
-              m_Level, m_Param->metric == GreedyParameters::NMI,
-              tran, m_Metric, m_Mask, m_GradMetric, m_GradMask, m_Phi, grad);
-
-      flatten_affine_transform(grad.GetPointer(), g->data_block());
-
-      val *= -10000.0;
-      (*g) *= -10000.0;
-
-      }
-    }
-  else
-    {
-    if(m_Param->metric == GreedyParameters::SSD)
-      {
-      val = m_OFHelper->ComputeAffineMSDMatchAndGradient(
-              m_Level, tran, m_Metric, m_Mask, m_GradMetric, m_GradMask, m_Phi, NULL);
-      }
-    else if(m_Param->metric == GreedyParameters::NCC)
-      {
-      val = m_OFHelper->ComputeAffineNCCMatchAndGradient(
-              m_Level, tran, array_caster<VDim>::to_itkSize(m_Param->metric_radius)
-              , m_Metric, m_Mask, m_GradMetric, m_GradMask, m_Phi, NULL);
-
-      // NCC should be maximized
-      val *= -10000.0;
-      }
-    else if(m_Param->metric == GreedyParameters::MI || m_Param->metric == GreedyParameters::NMI)
-      {
-      val = m_OFHelper->ComputeAffineMIMatchAndGradient(
-              m_Level, m_Param->metric == GreedyParameters::NMI,
-              tran, m_Metric, m_Mask, m_GradMetric, m_GradMask, m_Phi, NULL);
-
-      val *= -10000.0;
-      }
-    }
-
-  // Has the metric improved?
-  if(m_Parent->GetMetricLog().size())
-    {
-    const std::vector<double> &log = m_Parent->GetMetricLog().back();
-    if(log.size() == 0 || log.back() > val)
-      {
-      // Record the metric value
-      m_Parent->RecordMetricValue(val);
-
-      // Write out the current iteration transform
-      if(m_Param->output_intermediate.length())
-        {
-        vnl_matrix<double> Q_physical = MapAffineToPhysicalRASSpace(*m_OFHelper, m_Level, tran);
-        m_Parent->WriteAffineMatrixViaCache(m_Param->output_intermediate, Q_physical);
-        }
-      }
-    }
-
-  if(f)
-    *f = val;
-}
-
-template <unsigned int VDim, typename TReal>
-vnl_vector<double>
-GreedyApproach<VDim, TReal>::PureAffineCostFunction
-::GetCoefficients(LinearTransformType *tran)
-{
-  vnl_vector<double> x_true(this->get_number_of_unknowns());
-  flatten_affine_transform(tran, x_true.data_block());
-  return x_true;
-}
-
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::PureAffineCostFunction
-::GetTransform(const vnl_vector<double> &coeff, LinearTransformType *tran)
-{
-  unflatten_affine_transform(coeff.data_block(), tran);
-}
-
-template <unsigned int VDim, typename TReal>
-vnl_vector<double>
-GreedyApproach<VDim, TReal>::PureAffineCostFunction
-::GetOptimalParameterScaling(const itk::Size<VDim> &image_dim)
-{
-  // Initialize the scaling vector
-  vnl_vector<double> scaling(this->get_number_of_unknowns());
-
-  // Set the scaling of the parameters based on image dimensions. This makes it
-  // possible to set tolerances in units of voxels. The order of change in the
-  // parameters is comparable to the displacement of any point inside the image
-  typename LinearTransformType::MatrixType matrix;
-  typename LinearTransformType::OffsetType offset;
-
-  for(int i = 0; i < VDim; i++)
-    {
-    offset[i] = 1.0;
-    for(int j = 0; j < VDim; j++)
-      matrix(i, j) = image_dim[j];
-    }
-
-  typename LinearTransformType::Pointer transform = LinearTransformType::New();
-  transform->SetMatrix(matrix);
-  transform->SetOffset(offset);
-  flatten_affine_transform(transform.GetPointer(), scaling.data_block());
-
-  return scaling;
-}
-
-/**
- * PHYSICAL SPACE COST FUNCTION - WRAPS AROUND AFFINE
- */
-template <unsigned int VDim, typename TReal>
-GreedyApproach<VDim, TReal>::PhysicalSpaceAffineCostFunction
-::PhysicalSpaceAffineCostFunction(GreedyParameters *param, ParentType *parent, int level, OFHelperType *helper)
-  : AbstractAffineCostFunction(VDim * (VDim + 1)), m_PureFunction(param, parent, level, helper)
-{
-  // The rigid transformation must be rigid in physical space, not in voxel space
-  // So in the constructor, we must compute the mappings from the two spaces
-  GetVoxelSpaceToNiftiSpaceTransform(helper->GetReferenceSpace(level), Q_fix, b_fix);
-  GetVoxelSpaceToNiftiSpaceTransform(helper->GetMovingReferenceSpace(level), Q_mov, b_mov);
-
-  // Compute the inverse transformations
-  Q_fix_inv = vnl_matrix_inverse<double>(Q_fix);
-  b_fix_inv = - Q_fix_inv * b_fix;
-
-  Q_mov_inv = vnl_matrix_inverse<double>(Q_mov);
-  b_mov_inv = - Q_mov_inv * b_mov;
-
-  // Take advantage of the fact that the transformation is linear in A and b to compute
-  // the Jacobian of the transformation ahead of time, and "lazily", using finite differences
-  int n = VDim * (VDim + 1);
-  J_phys_vox.set_size(n, n);
-  vnl_vector<double> x_phys(n, 0), x_vox_0(n), x_vox(n);
-
-  // Voxel parameter vector corresponding to zero transform
-  this->map_phys_to_vox(x_phys, x_vox_0);
-
-  // Compute each column of the jacobian
-  for(int i = 0; i < n; i++)
-    {
-    x_phys.fill(0);
-    x_phys[i] = 1;
-    this->map_phys_to_vox(x_phys, x_vox);
-    J_phys_vox.set_column(i, x_vox - x_vox_0);
-    }
-
-
-}
-
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::PhysicalSpaceAffineCostFunction
-::map_phys_to_vox(const vnl_vector<double> &x_phys, vnl_vector<double> &x_vox)
-{
-  Mat A_phys;
-  Vec b_phys;
-
-  // unflatten the input parameters into A and b
-  unflatten_affine_transform(x_phys.data_block(), A_phys, b_phys);
-
-  // convert into voxel-space affine transform
-  Mat A_vox = Q_mov_inv * A_phys * Q_fix;
-  Vec b_vox = Q_mov_inv * (A_phys * b_fix + b_phys) + b_mov_inv;
-
-  // Flatten back
-  x_vox.set_size(m_PureFunction.get_number_of_unknowns());
-  flatten_affine_transform(A_vox, b_vox, x_vox.data_block());
-}
-
-
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::PhysicalSpaceAffineCostFunction
-::compute(const vnl_vector<double> &x, double *f, vnl_vector<double> *g)
-{
-  // Map to voxel space
-  vnl_vector<double> x_vox(m_PureFunction.get_number_of_unknowns());
-  this->map_phys_to_vox(x, x_vox);
-
-  // Do we need the gradient?
-  if(g)
-    {
-    // Compute the function and gradient wrt voxel parameters
-    vnl_vector<double> g_vox(m_PureFunction.get_number_of_unknowns());
-    m_PureFunction.compute(x_vox, f, &g_vox);
-
-    // Transform voxel-space gradient into physical-space gradient
-    *g = J_phys_vox.transpose() * g_vox;
-    }
-  else
-    {
-    // Just compute the function
-    m_PureFunction.compute(x_vox, f, NULL);
-    }
-}
-
-template <unsigned int VDim, typename TReal>
-vnl_vector<double>
-GreedyApproach<VDim, TReal>::PhysicalSpaceAffineCostFunction
-::GetOptimalParameterScaling(const itk::Size<VDim> &image_dim)
-{
-  // TODO: work out scaling for this
-  return m_PureFunction.GetOptimalParameterScaling(image_dim);
-}
-
-template <unsigned int VDim, typename TReal>
-vnl_vector<double>
-GreedyApproach<VDim, TReal>::PhysicalSpaceAffineCostFunction
-::GetCoefficients(LinearTransformType *tran)
-{
-  // The input transform is in voxel space, we must return parameters in physical space
-  Mat A_vox, A_phys;
-  Vec b_vox, b_phys;
-
-  itk_matrix_to_vnl_matrix(tran->GetMatrix(), A_vox);
-  itk_vector_to_vnl_vector(tran->GetOffset(), b_vox);
-
-  // convert into physical-space affine transform
-  A_phys = Q_mov * A_vox * Q_fix_inv;
-  b_phys = Q_mov * (b_vox - b_mov_inv) - A_phys * b_fix;
-
-  // Flatten
-  vnl_vector<double> x(m_PureFunction.get_number_of_unknowns());
-  flatten_affine_transform(A_phys, b_phys, x.data_block());
-
-  return x;
-}
-
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::PhysicalSpaceAffineCostFunction
-::GetTransform(const vnl_vector<double> &x, LinearTransformType *tran)
-{
-  // Get voxel-space tranform corresponding to the parameters x
-  vnl_vector<double> x_vox(m_PureFunction.get_number_of_unknowns());
-  this->map_phys_to_vox(x, x_vox);
-
-  // Unflatten into a transform
-  unflatten_affine_transform(x_vox.data_block(), tran);
-}
-
-
-/**
- * SCALING COST FUNCTION - WRAPS AROUND AFFINE
- */
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::ScalingCostFunction
-::compute(const vnl_vector<double> &x, double *f, vnl_vector<double> *g)
-{
-  // Scale the parameters so they are in unscaled units
-  vnl_vector<double> x_scaled = element_quotient(x, m_Scaling);
-
-  // Call the wrapped method
-  if(g)
-    {
-    vnl_vector<double> g_scaled(x_scaled.size());
-    m_PureFunction->compute(x_scaled, f, &g_scaled);
-    *g = element_quotient(g_scaled, m_Scaling);
-    }
-  else
-    {
-    m_PureFunction->compute(x_scaled, f, g);
-    }
-}
-
-// Get the parameters for the specified initial transform
-template <unsigned int VDim, typename TReal>
-vnl_vector<double>
-GreedyApproach<VDim, TReal>::ScalingCostFunction
-::GetCoefficients(LinearTransformType *tran)
-{
-  vnl_vector<double> x_true = m_PureFunction->GetCoefficients(tran);
-  return element_product(x_true, m_Scaling);
-}
-
-// Get the transform for the specificed coefficients
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::ScalingCostFunction
-::GetTransform(const vnl_vector<double> &coeff, LinearTransformType *tran)
-{
-  vnl_vector<double> x_true = element_quotient(coeff, m_Scaling);
-  m_PureFunction->GetTransform(x_true, tran);
-}
-
-
-
-/**
- * RIGID COST FUNCTION - WRAPS AROUND AFFINE
- */
-template <unsigned int VDim, typename TReal>
-GreedyApproach<VDim, TReal>::RigidCostFunction
-::RigidCostFunction(GreedyParameters *param, ParentType *parent, int level, OFHelperType *helper)
-  : AbstractAffineCostFunction(VDim * 2), m_AffineFn(param, parent, level, helper)
-{
-}
-
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::RigidCostFunction
-::compute(const vnl_vector<double> &x, double *f, vnl_vector<double> *g)
-{
-  // Place parameters into q and b
-  Vec3 q, b;
-  q[0] = x[0]; q[1] = x[1]; q[2] = x[2];
-  b[0] = x[3]; b[1] = x[4]; b[2] = x[5];
-
-  // Compute theta
-  double theta = q.magnitude();
-
-  // Predefine the rotation matrix
-  Mat3 R; R.set_identity();
-
-  // Create the Q matrix
-  Mat3 Qmat; Qmat.fill(0.0);
-  Qmat(0,1) = -q[2]; Qmat(1,0) =  q[2];
-  Qmat(0,2) =  q[1]; Qmat(2,0) = -q[1];
-  Qmat(1,2) = -q[0]; Qmat(2,1) =  q[0];
-
-  // Compute the square of the matrix
-  Mat3 QQ = vnl_matrix_fixed_mat_mat_mult(Qmat, Qmat);
-
-  // A small epsilon for which a better approximation is R = I + Q
-  double eps = 1.0e-4;
-  double a1, a2;
-
-  // When theta = 0, rotation is identity
-  if(theta > eps)
-    {
-    // Compute the constant terms in the Rodriguez formula
-    a1 = sin(theta) / theta;
-    a2 = (1 - cos(theta)) / (theta * theta);
-
-    // Compute the rotation matrix
-    R += a1 * Qmat + a2 * QQ;
-    }
-  else
-    {
-    R += Qmat;
-    }
-
-  // Now we have a rotation and a translation, convert to parameters for the affine function
-  vnl_vector<double> x_affine(m_AffineFn.get_number_of_unknowns());
-  flatten_affine_transform(R, b, x_affine.data_block());
-
-  // Split depending on whether there is gradient to compute
-  if(g)
-    {
-    // Create a vector to store the affine gradient
-    vnl_vector<double> g_affine(m_AffineFn.get_number_of_unknowns());
-    m_AffineFn.compute(x_affine, f, &g_affine);
-
-    // Compute the matrices d_Qmat
-    Mat3 d_Qmat[3], d_R[3];
-    d_Qmat[0].fill(0); d_Qmat[0](1,2) = -1; d_Qmat[0](2,1) =  1;
-    d_Qmat[1].fill(0); d_Qmat[1](0,2) =  1; d_Qmat[1](2,0) = -1;
-    d_Qmat[2].fill(0); d_Qmat[2](0,1) = -1; d_Qmat[2](1,0) =  1;
-
-    // Compute partial derivatives of R wrt q
-    if(theta > eps)
-      {
-      // Compute the scaling factors in the Rodriguez formula
-      double d_a1 = (theta * cos(theta) - sin(theta)) / (theta * theta * theta);
-      double d_a2 = (theta * sin(theta) + 2 * cos(theta) - 2) /
-                    (theta * theta * theta * theta);
-
-      // Loop over the coordinate and compute the derivative of the rotation matrix wrt x
-      for(int p = 0; p < 3; p++)
-        {
-        // Compute the gradient of the rotation with respect to q[p]
-        d_R[p] = d_a1 * q[p] * Qmat +
-                 a1 * d_Qmat[p] +
-                 d_a2 * q[p] * vnl_matrix_fixed_mat_mat_mult(Qmat, Qmat)
-                 + a2 * (vnl_matrix_fixed_mat_mat_mult(d_Qmat[p], Qmat) +
-                         vnl_matrix_fixed_mat_mat_mult(Qmat, d_Qmat[p]));
-        }
-      }
-    else
-      {
-      for(int p = 0; p < 3; p++)
-        d_R[p] = d_Qmat[p];
-      }
-
-    // Create a matrix to hold the jacobian
-    vnl_matrix<double> jac(m_AffineFn.get_number_of_unknowns(), 6);
-    jac.fill(0.0);
-
-    // Zero vector
-    Vec3 zero_vec; zero_vec.fill(0.0);
-    Mat3 zero_mat; zero_mat.fill(0.0);
-
-    // Fill out the jacobian
-    for(int p = 0; p < 3; p++)
-      {
-      // Fill the corresponding column
-      vnl_vector<double> jac_col_q(m_AffineFn.get_number_of_unknowns());
-      flatten_affine_transform(d_R[p], zero_vec, jac_col_q.data_block());
-      jac.set_column(p, jac_col_q);
-
-      // Also set column on the right (wrt translation)
-      vnl_vector<double> jac_col_b(m_AffineFn.get_number_of_unknowns());
-      Vec3 ep; ep.fill(0.0); ep[p] = 1;
-      flatten_affine_transform(zero_mat, ep, jac_col_b.data_block());
-      jac.set_column(p+3, jac_col_b);
-      }
-
-    // Multiply the gradient by the jacobian
-    *g = jac.transpose() * g_affine;
-    }
-  else
-    {
-    m_AffineFn.compute(x_affine, f, NULL);
-    }
-}
-
-template <unsigned int VDim, typename TReal>
-vnl_vector<double>
-GreedyApproach<VDim, TReal>::RigidCostFunction
-::GetOptimalParameterScaling(const itk::Size<VDim> &image_dim)
-{
-  // Initialize the scaling vector
-  vnl_vector<double> scaling(this->get_number_of_unknowns());
-
-  // Scaling is harder for rotations. The rotation parameters are in units of
-  // radians. We must figure out how many radians are equivalent to a point in
-  // the image moving by a single voxel. That actually works out to be 1/dim.
-
-  // So we take the average of the image dimensions and use that as scaling
-  double mean_dim = 0;
-  for(int i = 0; i < VDim; i++)
-    mean_dim += image_dim[i] / VDim;
-  scaling[0] = scaling[1] = scaling[2] = mean_dim;
-  scaling[3] = scaling[4] = scaling[5] = 1.0;
-
-  return scaling;
-}
-
-template <unsigned int VDim, typename TReal>
-vnl_vector<double>
-GreedyApproach<VDim, TReal>::RigidCostFunction
-::GetCoefficients(LinearTransformType *tran)
-{
-  // This affine transform is in voxel space. We must first map it into physical
-  vnl_vector<double> x_aff_phys = m_AffineFn.GetCoefficients(tran);
-  Mat3 A; Vec3 b;
-  unflatten_affine_transform(x_aff_phys.data_block(), A, b);
-
-  // Compute polar decomposition of the affine matrix
-  vnl_svd<double> svd(A);
-  Mat3 R = svd.U() * svd.V().transpose();
-  Vec3 q = this->GetAxisAngle(R);
-
-  // Make result
-  vnl_vector<double> x(6);
-  x[0] = q[0]; x[1] = q[1]; x[2] = q[2];
-  x[3] = b[0]; x[4] = b[1]; x[5] = b[2];
-
-  return x;
-}
-
-template <unsigned int VDim, typename TReal>
-typename GreedyApproach<VDim, TReal>::RigidCostFunction::Vec3
-GreedyApproach<VDim, TReal>::RigidCostFunction
-::GetAxisAngle(const Mat3 &R)
-{
-  double eps = 1e-4;
-  double f_thresh = cos(eps);
-
-  // Compute the matrix logarithm of R
-  double f = (vnl_trace(R) - 1) / 2;
-  Vec3 q;
-  if(f >= f_thresh)
-    {
-    q[0] = R(2,1) - R(1,2);
-    q[1] = R(0,2) - R(2,0);
-    q[2] = R(1,0) - R(0,1);
-    q *= 0.5;
-    }
-  else
-    {
-    double theta = acos(f);
-    double sin_theta = sqrt(1 - f * f);
-    q[0] = R(2,1) - R(1,2);
-    q[1] = R(0,2) - R(2,0);
-    q[2] = R(1,0) - R(0,1);
-    q *= theta / (2 * sin_theta);
-    }
-
-  return q;
-}
-
-
-
-template <unsigned int VDim, typename TReal>
-vnl_vector<double>
-GreedyApproach<VDim, TReal>::RigidCostFunction
-::GetRandomCoeff(const vnl_vector<double> &xInit, vnl_random &randy, double sigma_angle, double sigma_xyz,
-                 const Vec3 &C_fixed, const Vec3 &C_moving)
-{
-  // Generate a random axis of rotation. A triple of Gaussian numbers, normalized to 
-  // unit length gives a uniform distribution over the sphere
-  Vec3 q_axis;
-  for(int d = 0; d < 3; d++)
-    q_axis[d] = randy.normal();
-  q_axis.normalize();
-
-  // Generate an angle of rotation from the normal distribution (degrees->radians)
-  Vec3 q = q_axis * (randy.normal() * sigma_angle * 0.01745329252);
-
-  // Generate a random rotation using given angles
-  Mat3 R = this->GetRotationMatrix(q);
-
-  // Generate a rotation matrix for the initial parameters
-  Vec3 qInit;
-  for(int d = 0; d < 3; d++)
-    qInit[d] = xInit[d];
-  Mat3 R_init = this->GetRotationMatrix(qInit);
-
-  // Combined rotation
-  Mat3 R_comb = R * R_init;
-
-  // Take the log map
-  Vec3 q_comb = this->GetAxisAngle(R_comb);
-
-  // Generate the offset
-  Vec3 b = C_moving - R_comb * C_fixed;
-
-  // Apply random offset
-  for(int d = 0; d < 3; d++)
-    b[d] += randy.normal() * sigma_xyz;
-
-  // Generate output vector
-  vnl_vector<double> x(6);
-  x[0] = q_comb[0];
-  x[1] = q_comb[1];
-  x[2] = q_comb[2];
-  x[3] = b[0];
-  x[4] = b[1];
-  x[5] = b[2];
-
-  return x;
-}
-
-template <unsigned int VDim, typename TReal>
-typename GreedyApproach<VDim, TReal>::RigidCostFunction::Mat3
-GreedyApproach<VDim, TReal>::RigidCostFunction
-::GetRotationMatrix(const Vec3 &q)
-{
-  // Compute theta
-  double theta = q.magnitude();
-
-  // Predefine the rotation matrix
-  Mat3 R; R.set_identity();
-
-  // Create the Q matrix
-  Mat3 Qmat; Qmat.fill(0.0);
-  Qmat(0,1) = -q[2]; Qmat(1,0) =  q[2];
-  Qmat(0,2) =  q[1]; Qmat(2,0) = -q[1];
-  Qmat(1,2) = -q[0]; Qmat(2,1) =  q[0];
-
-  // Compute the square of the matrix
-  Mat3 QQ = vnl_matrix_fixed_mat_mat_mult(Qmat, Qmat);
-
-  // When theta = 0, rotation is identity
-  double eps = 1e-4;
-
-  if(theta > eps)
-    {
-    // Compute the constant terms in the Rodriguez formula
-    double a1 = sin(theta) / theta;
-    double a2 = (1 - cos(theta)) / (theta * theta);
-
-    // Compute the rotation matrix
-    R += a1 * Qmat + a2 * QQ;
-    }
-  else
-    {
-    R += Qmat;
-    }
-
-  return R;
-}
-
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, TReal>::RigidCostFunction
-::GetTransform(const vnl_vector<double> &x, LinearTransformType *tran)
-{
-  // Place parameters into q and b
-  Vec3 q, b;
-  q[0] = x[0]; q[1] = x[1]; q[2] = x[2];
-  b[0] = x[3]; b[1] = x[4]; b[2] = x[5];
-
-  // Get the rotation matrix
-  Mat3 R = this->GetRotationMatrix(q);
-
-  // This gives us the physical space affine matrices. Flatten and map to voxel space
-  vnl_vector<double> x_aff_phys(m_AffineFn.get_number_of_unknowns());
-  flatten_affine_transform(R, b, x_aff_phys.data_block());
-  m_AffineFn.GetTransform(x_aff_phys, tran);
-}
-
-
-/*
-template <unsigned int VDim, typename TReal>
-void
-GreedyApproach<VDim, double>::AffineCostFunction
-::compute(const vnl_vector<double> &x, double *f, vnl_vector<double> *g)
-{
-  // Form a matrix/vector from x
-  typename TransformType::Pointer tran = TransformType::New();
-
-  // Set the components of the transform
-  unflatten_affine_transform(x.data_block(), tran.GetPointer());
-
-  // Compute the gradient
-  double val = 0.0;
-  if(g)
-    {
-    typename TransformType::Pointer grad = TransformType::New();
-    val = m_OFHelper->ComputeAffineMatchAndGradient(m_Level, tran, grad);
-    flatten_affine_transform(grad.GetPointer(), g->data_block());
-    }
-  else
-    {
-    val = m_OFHelper->ComputeAffineMatchAndGradient(m_Level, tran, NULL);
-    }
-
-  if(f)
-    *f = val;
-}
-*
-*
-*/
 
 #include "itkTransformFileReader.h"
 
@@ -911,7 +98,7 @@ GreedyApproach<VDim, TReal>
   typename ImageCache::const_iterator itCache = m_ImageCache.find(ts.filename);
   if(itCache != m_ImageCache.end())
     {
-    TransformType *cached = dynamic_cast<TransformType *>(itCache->second);
+    TransformType *cached = dynamic_cast<TransformType *>(itCache->second.target);
     if(!cached)
       throw GreedyException("Cached transform %s cannot be cast to type %s",
                             ts.filename.c_str(), typeid(TransformType).name());
@@ -1017,7 +204,7 @@ GreedyApproach<VDim, TReal>
   typename ImageCache::const_iterator itCache = m_ImageCache.find(filename);
   if(itCache != m_ImageCache.end())
     {
-    TransformType *cached = dynamic_cast<TransformType *>(itCache->second);
+    TransformType *cached = dynamic_cast<TransformType *>(itCache->second.target);
     if(!cached)
       throw GreedyException("Cached transform %s cannot be cast to type %s",
                             filename.c_str(), typeid(TransformType).name());
@@ -1047,7 +234,9 @@ GreedyApproach<VDim, TReal>
     cached->SetMatrix(matrix);
     cached->SetOffset(offset);
     }
-  else
+
+  // Write to actual file
+  if(itCache == m_ImageCache.end() || itCache->second.force_write)
     {
     std::ofstream matrixFile;
     matrixFile.open(filename.c_str());
@@ -1056,23 +245,45 @@ GreedyApproach<VDim, TReal>
     }
 }
 
+template<unsigned int VDim, typename TReal>
+vnl_matrix<double>
+GreedyApproach<VDim, TReal>
+::ReadAffineMatrix(const TransformSpec &ts)
+{
+  GreedyApproach<VDim, TReal> api;
+  return api.ReadAffineMatrixViaCache(ts);
+}
 
+template<unsigned int VDim, typename TReal>
+void
+GreedyApproach<VDim, TReal>
+::WriteAffineMatrix(const std::string &filename, const vnl_matrix<double> &Qp)
+{
+  GreedyApproach<VDim, TReal> api;
+  api.WriteAffineMatrixViaCache(filename, Qp);
+}
 
 template <unsigned int VDim, typename TReal>
 template <class TImage>
 itk::SmartPointer<TImage>
 GreedyApproach<VDim, TReal>
-::ReadImageViaCache(const std::string &filename)
+::ReadImageViaCache(const std::string &filename,
+                    itk::ImageIOBase::IOComponentType *comp_type)
 {
   // Check the cache for the presence of the image
   typename ImageCache::const_iterator it = m_ImageCache.find(filename);
   if(it != m_ImageCache.end())
     {
-    TImage *image = dynamic_cast<TImage *>(it->second);
+    itk::Object *cached_object = it->second.target;
+    TImage *image = dynamic_cast<TImage *>(cached_object);
     if(!image)
       throw GreedyException("Cached image %s cannot be cast to type %s",
                             filename.c_str(), typeid(TImage).name());
     itk::SmartPointer<TImage> pointer = image;
+
+    // The component type is unknown here
+    if(comp_type)
+      *comp_type = itk::ImageIOBase::UNKNOWNCOMPONENTTYPE;
 
     return pointer;
     }
@@ -1083,10 +294,119 @@ GreedyApproach<VDim, TReal>
   reader->SetFileName(filename.c_str());
   reader->Update();
 
+  // Store the component type if requested
+  if(comp_type)
+    *comp_type = reader->GetImageIO()->GetComponentType();
+
   itk::SmartPointer<TImage> pointer = reader->GetOutput();
   return pointer;
 }
 
+template <unsigned int VDim, typename TReal>
+typename GreedyApproach<VDim, TReal>::ImageBaseType::Pointer
+GreedyApproach<VDim, TReal>
+::ReadImageBaseViaCache(const std::string &filename)
+{
+  // Check the cache for the presence of the image
+  typename ImageCache::const_iterator it = m_ImageCache.find(filename);
+  if(it != m_ImageCache.end())
+    {
+    ImageBaseType *image_base = dynamic_cast<ImageBaseType *>(it->second.target);
+    if(!image_base)
+      throw GreedyException("Cached image %s cannot be cast to type %s",
+                            filename.c_str(), typeid(ImageBaseType).name());
+    typename ImageBaseType::Pointer pointer = image_base;
+    return pointer;
+    }
+
+  // Read the image using ITK reader
+  typedef itk::ImageFileReader<ImageType> ReaderType;
+  typename ReaderType::Pointer reader = ReaderType::New();
+  reader->SetFileName(filename.c_str());
+  reader->Update();
+
+  typename ImageBaseType::Pointer pointer = reader->GetOutput();
+  return pointer;
+}
+
+
+template <unsigned int VDim, typename TReal>
+template <class TImage>
+void
+GreedyApproach<VDim, TReal>
+::WriteImageViaCache(TImage *img, const std::string &filename, typename LDDMMType::IOComponentType comp)
+{
+  typename ImageCache::const_iterator it = m_ImageCache.find(filename);
+  if(it != m_ImageCache.end())
+    {
+    // The image was found in the cache. Make sure it is an image pointer
+    typename LDDMMType::ImageBaseType *cached =
+        dynamic_cast<typename LDDMMType::ImageBaseType *>(it->second.target);
+
+    if(!cached)
+      throw GreedyException("Cached image %s cannot be cast to ImageBase",
+                            filename.c_str(), typeid(TImage).name());
+
+    // Try the automatic cast
+    bool cast_rc = false;
+
+    // This is a little dumb, but the vimg_write uses some special code that
+    // we need to account for
+    if(dynamic_cast<VectorImageType *>(img))
+      cast_rc =LDDMMType::vimg_auto_cast(dynamic_cast<VectorImageType *>(img), cached);
+    else if(dynamic_cast<ImageType *>(img))
+      cast_rc =LDDMMType::img_auto_cast(dynamic_cast<ImageType *>(img), cached);
+    else if(dynamic_cast<CompositeImageType *>(img))
+      cast_rc =LDDMMType::cimg_auto_cast(dynamic_cast<CompositeImageType *>(img), cached);
+    else
+      {
+      // Some other type (e.g., LabelImage). Instead of doing an auto_cast, we require the
+      // cached object to be of the same type as the image
+      TImage *cached_typed = dynamic_cast<TImage *>(cached);
+      if(cached_typed)
+        {
+        typedef itk::CastImageFilter<TImage, TImage> CopyFilterType;
+        typename CopyFilterType::Pointer copier = CopyFilterType::New();
+        copier->SetInput(img);
+        copier->GraftOutput(cached_typed);
+        copier->Update();
+        }
+      else throw GreedyException("Cached image %s cannot be cast to type %s",
+                                 filename.c_str(), typeid(TImage).name());
+      }
+
+
+    // If cast failed, throw exception
+    if(!cast_rc)
+      throw GreedyException("Image to save %s could not cast to any known type", filename.c_str());
+    }
+
+  if(it == m_ImageCache.end() || it->second.force_write)
+    {
+    // This is a little dumb, but the vimg_write uses some special code that
+    // we need to account for
+    if(dynamic_cast<VectorImageType *>(img))
+      LDDMMType::vimg_write(dynamic_cast<VectorImageType *>(img), filename.c_str(), comp);
+    else if(dynamic_cast<ImageType *>(img))
+      LDDMMType::img_write(dynamic_cast<ImageType *>(img), filename.c_str(), comp);
+    else if(dynamic_cast<CompositeImageType *>(img))
+      LDDMMType::cimg_write(dynamic_cast<CompositeImageType *>(img), filename.c_str(), comp);
+    else
+      {
+      // Some other type (e.g., LabelImage). We use the image writer and ignore the comp
+      typedef itk::ImageFileWriter<TImage> WriterType;
+      typename WriterType::Pointer writer = WriterType::New();
+      writer->SetFileName(filename.c_str());
+      writer->SetUseCompression(true);
+      writer->SetInput(img);
+      writer->Update();
+      }
+    }
+}
+
+
+
+#include <itkBinaryErodeImageFilter.h>
 
 template <unsigned int VDim, typename TReal>
 void GreedyApproach<VDim, TReal>
@@ -1095,12 +415,19 @@ void GreedyApproach<VDim, TReal>
   // If the parameters include a sequence of transforms, apply it first
   VectorImagePointer moving_pre_warp;
 
+  // Keep a pointer to the fixed image space
+  typename OFHelperType::ImageBaseType *ref_space = NULL;
+
   // Read the input images and stick them into an image array
   for(int i = 0; i < param.inputs.size(); i++)
     {
     // Read fixed and moving images
     CompositeImagePointer imgFix = ReadImageViaCache<CompositeImageType>(param.inputs[i].fixed);
     CompositeImagePointer imgMov = ReadImageViaCache<CompositeImageType>(param.inputs[i].moving);
+
+    // Store the fixed image and/or check it
+    if(ref_space == NULL)
+      ref_space = imgFix;
 
     // Read the pre-warps (only once)
     if(param.moving_pre_transforms.size() && moving_pre_warp.IsNull())
@@ -1111,9 +438,8 @@ void GreedyApproach<VDim, TReal>
     if(moving_pre_warp.IsNotNull())
       {
       // Create an image to store the warp
-      CompositeImagePointer warped_moving;
-      LDDMMType::alloc_cimg(warped_moving, imgFix,
-                            imgMov->GetNumberOfComponentsPerPixel());
+      CompositeImagePointer warped_moving =
+          LDDMMType::new_cimg(imgFix, imgMov->GetNumberOfComponentsPerPixel());
 
       // Interpolate the moving image using the transform chain
       LDDMMType::interp_cimg(imgMov, moving_pre_warp, warped_moving, false, true);
@@ -1138,6 +464,14 @@ void GreedyApproach<VDim, TReal>
     ofhelper.SetGradientMask(imgMask);
     }
 
+  if(param.gradient_mask_trim_radius.size() == VDim)
+    {
+    if(param.gradient_mask.size())
+      throw GreedyException("Cannot specify both gradient mask and gradient mask trim radius");
+
+    ofhelper.SetGradientMaskTrimRadius(param.gradient_mask_trim_radius);
+    }
+
   // Read the moving-space mask
   if(param.moving_mask.size())
     {
@@ -1148,8 +482,7 @@ void GreedyApproach<VDim, TReal>
     if(moving_pre_warp.IsNotNull())
       {
       // Create an image to store the warp
-      typename MaskType::Pointer warped_moving_mask;
-      LDDMMType::alloc_img(warped_moving_mask, moving_pre_warp);
+      typename MaskType::Pointer warped_moving_mask = LDDMMType::new_img(moving_pre_warp);
 
       // Interpolate the moving image using the transform chain
       LDDMMType::interp_img(imgMovMask, moving_pre_warp, warped_moving_mask, false, true);
@@ -1250,10 +583,10 @@ GreedyApproach<VDim, TReal>
 template <unsigned int VDim, typename TReal>
 void
 GreedyApproach<VDim, TReal>
-::RecordMetricValue(double val)
+::RecordMetricValue(const MultiComponentMetricReport &metric)
 {
   if(m_MetricLog.size())
-    m_MetricLog.back().push_back(val);
+    m_MetricLog.back().push_back(metric);
 }
 
 /**
@@ -1329,6 +662,11 @@ template <unsigned int VDim, typename TReal>
 int GreedyApproach<VDim, TReal>
 ::RunAffine(GreedyParameters &param)
 {
+  typedef AbstractAffineCostFunction<VDim, TReal> AbstractAffineCostFunction;
+  typedef RigidCostFunction<VDim, TReal> RigidCostFunction;
+  typedef ScalingCostFunction<VDim, TReal> ScalingCostFunction;
+  typedef PhysicalSpaceAffineCostFunction<VDim, TReal> PhysicalSpaceAffineCostFunction;
+
   // Create an optical flow helper object
   OFHelperType of_helper;
 
@@ -1354,7 +692,7 @@ int GreedyApproach<VDim, TReal>
   for(unsigned int level = 0; level < nlevels; ++level)
     {
     // Add stage to metric log
-    m_MetricLog.push_back(std::vector<double>());
+    m_MetricLog.push_back(std::vector<MultiComponentMetricReport>());
 
     // Define the affine cost function
     AbstractAffineCostFunction *pure_acf, *acf;
@@ -1442,50 +780,93 @@ int GreedyApproach<VDim, TReal>
       // If the uses asks for rigid search, do it!
       if(param.rigid_search.iterations > 0)
         {
+        // Random seed. TODO: let user supply seed
+        vnl_random randy(12345);
+
+        // For rigid search, we must search in physical space, rather than in voxel space.
+        // This is the affine transformation in physical space that corresponds to whatever
+        // the current initialization is.
+        vnl_matrix<double> Qp = MapAffineToPhysicalRASSpace(of_helper, level, tLevel);
+
+        // Get the center of the fixed image in physical coordinates
+        vnl_vector<double> cfix = GetImageCenterinNiftiSpace(of_helper.GetReferenceSpace(level));
+
         // Create a pure rigid acf
         RigidCostFunction search_fun(&param, this, level, &of_helper);
 
-        // Get the parameters corresponding to the current transform
-        vnl_vector<double> xRigidInit = search_fun.GetCoefficients(tLevel);
-
-        // Get center of fixed and moving images in physical space
-        vnl_vector<double> cfix = GetImageCenterinNiftiSpace(of_helper.GetReferenceSpace(level));
-        vnl_vector<double> cmov = GetImageCenterinNiftiSpace(of_helper.GetMovingReferenceSpace(level));
-
-        // At random, try a whole bunch of transforms, around 5 degrees
-        vnl_random randy(12345);
-
-        // TODO: make a heap of k best tries
-        double fBest;
-        vnl_vector<double> xBest = xRigidInit;
-        search_fun.compute(xBest, &fBest, NULL);
-
         // Report the initial best
+        double fBest = 0.0;
+        vnl_vector<double> xBest = search_fun.GetCoefficients(tLevel);
+        search_fun.compute(xBest, &fBest, NULL);
         std::cout << "Rigid search -> Initial best: " << fBest << " " << xBest << std::endl;
 
+        // Loop over random iterations
         for(int i = 0; i < param.rigid_search.iterations; i++)
           {
-          // Get random coefficient
-          // Compute a random rotation
-          vnl_vector<double> xTry = search_fun.GetRandomCoeff(xRigidInit, randy,
-                                                              param.rigid_search.sigma_angle,
-                                                              param.rigid_search.sigma_xyz,
-                                                              cfix, cmov);
+          // Depending on the search mode, we either apply a small rotation, or any random rotation,
+          // or a random rotation and a flip to the input. Whatever rotation we apply, it must
+          // be around the center of the fixed coordinate system.
+          typename RigidCostFunction::Mat RF;
+          if(param.rigid_search.mode == RANDOM_NORMAL_ROTATION)
+            {
+            // Random angle in radians
+            double alpha = randy.normal() * param.rigid_search.sigma_angle * 0.01745329252;
+            RF = RigidCostFunction::GetRandomRotation(randy, alpha);
+            }
+          else if(param.rigid_search.mode == ANY_ROTATION)
+            {
+            double alpha = randy.drand32(-vnl_math::pi, vnl_math::pi);
+            RF = RigidCostFunction::GetRandomRotation(randy, alpha);
+            }
+          else if(param.rigid_search.mode == ANY_ROTATION_AND_FLIP)
+            {
+            typename RigidCostFunction::Mat R, F;
+            F.set_identity();
+            for(unsigned int a = 0; a < VDim; a++)
+              F(a,a) = (randy.normal() > 0.0) ? 1.0 : -1.0;
+            double alpha = randy.drand32(-vnl_math::pi, vnl_math::pi);
+            R = RigidCostFunction::GetRandomRotation(randy, alpha);
+            RF = R * F;
+            }
+          else throw GreedyException("Unknown rotation search mode encountered");
 
-          // Evaluate this transform
-          double f;
+          // Find the offset so that the rotation/flip preserve fixed image center
+          typename RigidCostFunction::Vec b_RF = cfix - RF * cfix;
+
+          // Create the physical space matrix corresponding to random search point
+          vnl_matrix<double> Qp_rand(VDim+1, VDim+1); Qp_rand.set_identity();
+          Qp_rand.update(RF);
+          for(unsigned int a = 0; a < VDim; a++)
+            Qp_rand(a,VDim) = b_RF[a];
+
+          // Combine the two matrices. The matrix Qp_rand operates in fixed image space so
+          // it should be applied first, followed by Qp
+          vnl_matrix<double> Qp_search = Qp * Qp_rand;
+
+          // Add the random translation
+          for(unsigned int a = 0; a < VDim; a++)
+            Qp_search(a,VDim) += randy.normal() * param.rigid_search.sigma_xyz;
+
+          // Convert this physical space transformation into a voxel-space transform
+          typename LinearTransformType::Pointer tSearchTry = LinearTransformType::New();
+          MapPhysicalRASSpaceToAffine(of_helper, level, Qp_search, tSearchTry);
+
+          // Evaluate the metric for this point
+          vnl_vector<double> xTry = search_fun.GetCoefficients(tSearchTry);
+          double f = 0.0;
           search_fun.compute(xTry, &f, NULL);
 
+          // Is this an improvement?
           if(f < fBest)
             {
             fBest = f;
-            xBest = xTry;
-            std::cout << "New best: " << fBest << " " << xBest << std::endl;
+            tLevel->SetMatrix(tSearchTry->GetMatrix());
+            tLevel->SetOffset(tSearchTry->GetOffset());
+            std::cout << "Rigid search -> Iter " << i << ": " << fBest << " "
+                      << xTry << " det = " << vnl_determinant(Qp_search)
+                      <<  std::endl;
             }
           }
-
-        xInit = xBest;
-        search_fun.GetTransform(xInit, tLevel);
         }
       }
     else
@@ -1523,11 +904,18 @@ int GreedyApproach<VDim, TReal>
         vnl_vector<double> x1 = xLevel, x2 = xLevel, x3 = xLevel, x4 = xLevel;
         x1[i] -= 2 * eps; x2[i] -= eps; x3[i] += eps; x4[i] += 2 * eps;
 
-        // Four-point derivative computation
-        acf->compute(x1, &f1, NULL);
-        acf->compute(x2, &f2, NULL);
-        acf->compute(x3, &f3, NULL);
-        acf->compute(x4, &f4, NULL);
+        // Keep track of gradient even though we do not need it. There is an apparent bug
+        // at least with the NCC metric, where the reuse of the working image in a scenario
+        // where you first compute the gradient and then do not, causes the iteration through
+        // the working image to incorrectly align the per-pixel arrays. Asking for gradient
+        // every time is a little more costly, but it avoids this issue
+        vnl_vector<double> xGradDummy(acf->get_number_of_unknowns(), 0.0);
+
+        // Four-point derivative computation        
+        acf->compute(x1, &f1, &xGradDummy);
+        acf->compute(x2, &f2, &xGradDummy);
+        acf->compute(x3, &f3, &xGradDummy);
+        acf->compute(x4, &f4, &xGradDummy);
 
         xGradN[i] = (f1 - 8 * f2 + 8 * f3 - f4) / (12 * eps);
         }
@@ -1617,9 +1005,26 @@ int GreedyApproach<VDim, TReal>
         // Use the pre-initialization transform parameters
         Q_physical = MapAffineToPhysicalRASSpace(of_helper, level, tLevel);
         }
+
+      // End of level report
+      printf("END OF LEVEL %3d\n", level);
+
+      // Print final metric report
+      MultiComponentMetricReport metric_report = this->GetMetricLog()[level].back();
+      printf("Level %3d  LastIter   Metrics", level);
+      for (unsigned i = 0; i < metric_report.ComponentMetrics.size(); i++)
+        printf("  %8.6f", metric_report.ComponentMetrics[i]);
+      printf("  Energy = %8.6f\n", metric_report.TotalMetric);
+      fflush(stdout);
       }
 
-    std::cout << "Final RAS Transform: " << std::endl << Q_physical << std::endl;
+    // Print the final RAS transform for this level (even if no iter)
+    printf("Level %3d  Final RAS Transform:\n", level);
+    for(unsigned int a = 0; a < VDim+1; a++)
+      {
+      for(unsigned int b = 0; b < VDim+1; b++)
+        printf("%8.4f%c", Q_physical(a,b), b < VDim ? ' ' : '\n');
+      }
 
     delete acf;
     delete pure_acf;
@@ -1630,8 +1035,85 @@ int GreedyApproach<VDim, TReal>
   return 0;
 }
 
+
 #include "itkStatisticsImageFilter.h"
 
+/** My own time probe because itk's use of fork is messing up my debugging */
+class GreedyTimeProbe
+{
+public:
+  GreedyTimeProbe();
+  void Start();
+  void Stop();
+  double GetMean() const;
+protected:
+  double m_TotalTime;
+  double m_StartTime;
+  unsigned long m_Runs;
+};
+
+GreedyTimeProbe::GreedyTimeProbe()
+{
+  m_TotalTime = 0.0;
+  m_StartTime = 0.0;
+  m_Runs = 0.0;
+}
+
+void GreedyTimeProbe::Start()
+{
+  m_StartTime = clock();
+}
+
+void GreedyTimeProbe::Stop()
+{
+  if(m_StartTime == 0.0)
+    throw GreedyException("Timer stop without start");
+  m_TotalTime += clock() - m_StartTime;
+  m_StartTime = 0.0;
+  m_Runs++;
+}
+
+double GreedyTimeProbe::GetMean() const
+{
+  if(m_Runs == 0)
+    return 0.0;
+  else
+    return m_TotalTime / (CLOCKS_PER_SEC * m_Runs);
+}
+
+
+template <unsigned int VDim, typename TReal>
+std::string
+GreedyApproach<VDim, TReal>
+::PrintIter(int level, int iter, const MultiComponentMetricReport &metric) const
+{
+  // Start with a buffer
+  char b_level[64], b_iter[64], b_metrics[512], b_line[1024];
+
+  if(level < 0)
+    sprintf(b_level, "LastLevel");
+  else
+    sprintf(b_level, "Level %03d", level);
+
+  if(iter < 0)
+    sprintf(b_iter, "LastIter");
+  else
+    sprintf(b_iter, "Iter %05d", iter);
+
+  if(metric.ComponentMetrics.size() > 1)
+    {
+    int pos = sprintf(b_metrics, "Metrics");
+    for (unsigned i = 0; i < metric.ComponentMetrics.size(); i++)
+      pos += sprintf(b_metrics + pos, "  %8.6f", metric.ComponentMetrics[i]);
+    }
+  else
+    sprintf(b_metrics, "");
+
+  sprintf(b_line, "%s  %s  %s  Energy = %8.6f", b_level, b_iter, b_metrics, metric.TotalMetric);
+  std::string result = b_line;
+
+  return b_line;
+}
 
 /**
  * This is the main function of the GreedyApproach algorithm
@@ -1659,9 +1141,15 @@ int GreedyApproach<VDim, TReal>
   // The number of resolution levels
   unsigned nlevels = param.iter_per_level.size();
 
+  // Clear the metric log
+  m_MetricLog.clear();
+
   // Iterate over the resolution levels
   for(unsigned int level = 0; level < nlevels; ++level)
     {
+    // Add stage to metric log
+    m_MetricLog.push_back(std::vector<MultiComponentMetricReport>());
+
     // Reference space
     ImageBaseType *refspace = of_helper.GetReferenceSpace(level);
 
@@ -1679,7 +1167,7 @@ int GreedyApproach<VDim, TReal>
     std::cout << "  Smoothing sigmas: " << sigma_pre_phys << ", " << sigma_post_phys << std::endl;
 
     // Set up timers for different critical components of the optimization
-    itk::TimeProbe tm_Gradient, tm_Gaussian1, tm_Gaussian2, tm_Iteration, 
+    GreedyTimeProbe tm_Gradient, tm_Gaussian1, tm_Gaussian2, tm_Iteration,
       tm_Integration, tm_Update;
 
     // Intermediate images
@@ -1770,6 +1258,9 @@ int GreedyApproach<VDim, TReal>
       std::cout << "Index 24x24x24 maps to " << uk->GetPixel(test) << std::endl;
       }
 
+    if(uLevel.IsNotNull())
+      LDDMMType::vimg_write(uLevel, "/tmp/ulevel.nii.gz");
+
     // Iterate for this level
     for(unsigned int iter = 0; iter < param.iter_per_level[level]; iter++)
       {
@@ -1778,9 +1269,6 @@ int GreedyApproach<VDim, TReal>
 
       // The epsilon for this level
       double eps= param.epsilon_per_level[level];
-
-      // Compute the gradient of objective
-      double total_energy;
 
       // Integrate the total deformation field for this iteration
       if(param.flag_stationary_velocity_mode)
@@ -1799,143 +1287,54 @@ int GreedyApproach<VDim, TReal>
         uFull = uk;
         }
 
+      // Create a metric report that will be returned by all metrics
+      MultiComponentMetricReport metric_report;
+
+      // Begin gradient computation
+      tm_Gradient.Start();
+
+      // Switch based on the metric
       if(param.metric == GreedyParameters::SSD)
         {
-        // Begin gradient computation
-        tm_Gradient.Start();
-
-        vnl_vector<double> all_metrics =
-            of_helper.ComputeOpticalFlowField(level, uFull, iTemp, uk1, eps)  / eps;
+        of_helper.ComputeOpticalFlowField(level, uFull, iTemp, metric_report, uk1, eps);
+        metric_report.Scale(1.0 / eps);
 
         // If there is a mask, multiply the gradient by the mask
         if(param.gradient_mask.size())
           LDDMMType::vimg_multiply_in_place(uk1, of_helper.GetGradientMask(level));
-
-        // End gradient computation
-        tm_Gradient.Stop();
-
-        printf("Lev:%2d  Itr:%5d  Met:[", level, iter);
-        total_energy = 0.0;
-        for (unsigned i = 0; i < all_metrics.size(); i++)
-          {
-          printf("  %8.6f", all_metrics[i]);
-          total_energy += all_metrics[i];
-          }
-        printf("]  Tot: %8.6f\n", total_energy);
         }
 
       else if(param.metric == GreedyParameters::MI || param.metric == GreedyParameters::NMI)
         {
-        // Begin gradient computation
-        tm_Gradient.Start();
-
-        vnl_vector<double> all_metrics =
-            of_helper.ComputeMIFlowField(level, param.metric == GreedyParameters::NMI, uFull, iTemp, uk1, eps);
+        of_helper.ComputeMIFlowField(level, param.metric == GreedyParameters::NMI, uFull, iTemp, metric_report, uk1, eps);
 
         // If there is a mask, multiply the gradient by the mask
         if(param.gradient_mask.size())
           LDDMMType::vimg_multiply_in_place(uk1, of_helper.GetGradientMask(level));
-
-        // End gradient computation
-        tm_Gradient.Stop();
-
-        printf("Lev:%2d  Itr:%5d  Met:[", level, iter);
-        total_energy = 0.0;
-        for (unsigned i = 0; i < all_metrics.size(); i++)
-          {
-          printf("  %8.6f", all_metrics[i]);
-          total_energy += all_metrics[i];
-          }
-        printf("]  Tot: %8.6f\n", total_energy);
         }
 
       else if(param.metric == GreedyParameters::NCC)
         {
         itk::Size<VDim> radius = array_caster<VDim>::to_itkSize(param.metric_radius);
 
-        // Test derivative
-        // total_energy = of_helper.ComputeNCCMetricAndGradient(level, uk, uk1, radius, param.epsilon);
-
-        /*
-        if(iter == 0)
-          {
-
-          // Perform a derivative check!
-
-          itk::Index<VDim> test; test.Fill(24);
-          typename VectorImageType::PixelType vtest = uk->GetPixel(test), vv;
-
-          itk::ImageRegion<VDim> region = uk1->GetBufferedRegion();
-          // region.ShrinkByRadius(1);
-
-          double eps = param.epsilon;
-          for(int d = 0; d < VDim; d++)
-            {
-            vv.Fill(0.5); vv[d] -= eps; uk->FillBuffer(vv);
-            of_helper.ComputeNCCMetricImage(level, uk, radius, iTemp, uk1, 1.0);
-
-            double a1 = 0.0;
-            typedef itk::ImageRegionConstIterator<ImageType> Iter;
-            for(Iter it(iTemp, region); !it.IsAtEnd(); ++it)
-              {
-              a1 += it.Get();
-              }
-
-
-            vv.Fill(0.5); vv[d] += eps; uk->FillBuffer(vv);
-            of_helper.ComputeNCCMetricImage(level, uk, radius, iTemp, uk1, 1.0);
-
-            double a2 = 0.0;
-            typedef itk::ImageRegionConstIterator<ImageType> Iter;
-            for(Iter it(iTemp, region); !it.IsAtEnd(); ++it)
-              {
-              a2 += it.Get();
-              }
-
-            std::cout << "NUM:" << (a2 - a1) / (2*eps) << std::endl;
-
-            }
-
-          vv.Fill(0.5); uk->FillBuffer(vv);
-          total_energy = of_helper.ComputeNCCMetricImage(level, uk, radius, iTemp, uk1, 1.0);
-          for(int d = 0; d < VDim; d++)
-            {
-
-            double ader = 0.0;
-            typedef itk::ImageRegionConstIterator<VectorImageType> Iter;
-            for(Iter it(uk1, region); !it.IsAtEnd(); ++it)
-              {
-              ader += it.Get()[d];
-              }
-
-            // itk::Index<VDim> test; test.Fill(24);
-            // std::cout << "ANA:" << uk1->GetPixel(test) << std::endl;
-
-            std::cout << "ANA:" << ader << std::endl;
-            }
-          }
-          */
-
-        // Begin gradient computation
-        tm_Gradient.Start();
-
         // Compute the metric - no need to multiply by the mask, this happens already in the NCC metric code
-        total_energy = of_helper.ComputeNCCMetricImage(level, uFull, radius, iTemp, uk1, eps) / eps;
-
-        // End gradient computation
-        tm_Gradient.Stop();
-
-        printf("Level %5d,  Iter %5d:    Energy = %8.4f\n", level, iter, total_energy);
-        fflush(stdout);
+        of_helper.ComputeNCCMetricImage(level, uFull, radius, iTemp, metric_report, uk1, eps);
+        metric_report.Scale(1.0 / eps);
         }
       else if(param.metric == GreedyParameters::MAHALANOBIS)
         {
-        tm_Gradient.Start();
-        double total_energy = of_helper.ComputeMahalanobisMetricImage(level, uFull, iTemp, uk1);
-        tm_Gradient.Stop();
-        printf("Level %5d,  Iter %5d:    Energy = %8.4f\n", level, iter, total_energy);
-        fflush(stdout);
+        of_helper.ComputeMahalanobisMetricImage(level, uFull, iTemp, metric_report, uk1);
         }
+
+      // End gradient computation
+      tm_Gradient.Stop();
+
+      // Print a report for this iteration
+      std::cout << this->PrintIter(level, iter, metric_report) << std::endl;
+      fflush(stdout);
+
+      // Record the metric value in the log
+      this->RecordMetricValue(metric_report);
 
       // Dump the gradient image if requested
       if(param.flag_dump_moving && 0 == iter % param.dump_frequency)
@@ -2028,7 +1427,12 @@ int GreedyApproach<VDim, TReal>
       LDDMMType::field_jacobian_det(uk, iTemp);
       TReal jac_min, jac_max;
       LDDMMType::img_min_max(iTemp, jac_min, jac_max);
-      printf("END OF LEVEL %5d    DetJac Range: %8.4f  to %8.4f \n", level, jac_min, jac_max);
+      printf("END OF LEVEL %3d    DetJac Range: %8.4f  to %8.4f \n", level, jac_min, jac_max);
+
+      // Print final metric report
+      MultiComponentMetricReport metric_report = this->GetMetricLog()[level].back();
+      std::cout << this->PrintIter(level, -1, metric_report) << std::endl;
+      fflush(stdout);
 
       // Print timing information
       printf("  Avg. Gradient Time  : %6.4fs  %5.2f%% \n", tm_Gradient.GetMean(), 
@@ -2047,8 +1451,8 @@ int GreedyApproach<VDim, TReal>
   if(param.flag_stationary_velocity_mode)
     {
     // Take current warp to 'exponent' power - this is the actual warp
-    VectorImagePointer uLevelExp = LDDMMType::alloc_vimg(uLevel);
-    VectorImagePointer uLevelWork = LDDMMType::alloc_vimg(uLevel);
+    VectorImagePointer uLevelExp = LDDMMType::new_vimg(uLevel);
+    VectorImagePointer uLevelWork = LDDMMType::new_vimg(uLevel);
     LDDMMType::vimg_exp(uLevel, uLevelExp, uLevelWork, param.warp_exponent, 1.0);
 
     // Write the resulting transformation field
@@ -2084,8 +1488,7 @@ int GreedyApproach<VDim, TReal>
     if(param.inverse_warp.size())
       {
       // Compute the inverse
-      VectorImagePointer uInverse = VectorImageType::New();
-      LDDMMType::alloc_vimg(uInverse, uLevel);
+      VectorImagePointer uInverse = LDDMMType::new_vimg(uLevel);
       of_helper.ComputeDeformationFieldInverse(uLevel, uInverse, param.warp_exponent);
 
       // Write the warp using compressed format
@@ -2130,16 +1533,10 @@ int GreedyApproach<VDim, TReal>
   ImageBaseType *refspace = of_helper.GetReferenceSpace(0);
 
   // Intermediate images
-  VectorImagePointer u_best = VectorImageType::New();
-  VectorImagePointer u_curr = VectorImageType::New();
-  ImagePointer m_curr = ImageType::New();
-  ImagePointer m_best = ImageType::New();
-
-  // Allocate the intermediate data
-  LDDMMType::alloc_vimg(u_best, refspace);
-  LDDMMType::alloc_vimg(u_curr, refspace);
-  LDDMMType::alloc_img(m_best, refspace);
-  LDDMMType::alloc_img(m_curr, refspace);
+  VectorImagePointer u_best = LDDMMType::new_vimg(refspace);
+  VectorImagePointer u_curr = LDDMMType::new_vimg(refspace);
+  ImagePointer m_curr = LDDMMType::new_img(refspace);
+  ImagePointer m_best = LDDMMType::new_img(refspace);
 
   // Allocate m_best to a negative value
   m_best->FillBuffer(-100.0);
@@ -2163,7 +1560,8 @@ int GreedyApproach<VDim, TReal>
     u_curr->FillBuffer(vec_offset);
 
     // Perform interpolation and metric computation
-    of_helper.ComputeNCCMetricImage(0, u_curr, metric_rad, m_curr);
+    MultiComponentMetricReport metric_report;
+    of_helper.ComputeNCCMetricImage(0, u_curr, metric_rad, m_curr, metric_report);
 
     // Temp: keep track of number of updates
     unsigned long n_updates = 0;
@@ -2219,8 +1617,7 @@ void GreedyApproach<VDim, TReal>
     if(itk::ImageIOFactory::CreateImageIO(tran.c_str(), itk::ImageIOFactory::ReadMode))
       {
       // Create a temporary warp
-      VectorImagePointer warp_tmp = VectorImageType::New();
-      LDDMMType::alloc_vimg(warp_tmp, ref_space);
+      VectorImagePointer warp_tmp = LDDMMType::new_vimg(ref_space);
 
       // Read the next warp
       VectorImagePointer warp_i = VectorImageType::New();
@@ -2238,7 +1635,7 @@ void GreedyApproach<VDim, TReal>
           throw GreedyException("Currently only power of two exponents are supported for warps");
 
         // Bring the transform into voxel space
-        VectorImagePointer warp_exp = LDDMMType::alloc_vimg(warp_i);
+        VectorImagePointer warp_exp = LDDMMType::new_vimg(warp_i);
         OFHelperType::PhysicalWarpToVoxelWarp(warp_i, warp_i, warp_i);
 
         // Square the transform N times (in its own space)
@@ -2504,11 +1901,9 @@ int GreedyApproach<VDim, TReal>
 
   // Initialize empty array of Jacobians
   typedef typename LDDMMType::MatrixImageType JacobianImageType;
-  typename JacobianImageType::Pointer jac = JacobianImageType::New();
-  LDDMMType::alloc_mimg(jac, warp);
+  typename JacobianImageType::Pointer jac = LDDMMType::new_mimg(warp);
 
-  typename JacobianImageType::Pointer jac_work = JacobianImageType::New();
-  LDDMMType::alloc_mimg(jac_work, warp);
+  typename JacobianImageType::Pointer jac_work = LDDMMType::new_mimg(warp);
 
   // Compute the Jacobian of the root warp
   LDDMMType::field_jacobian(root_warp, jac);
@@ -2560,19 +1955,16 @@ int GreedyApproach<VDim, TReal>
                           "Use one of -rm, -rs or -rc commands.");
 
   // Read the fixed as a plain image (we don't care if it's composite)
-  ImagePointer ref = ImageType::New();
-  LDDMMType::img_read(r_param.ref_image.c_str(), ref);
-  itk::ImageBase<VDim> *ref_space = ref;
+  typename ImageBaseType::Pointer ref = ReadImageBaseViaCache(r_param.ref_image);
 
   // Read the transform chain
   VectorImagePointer warp;
-  ReadTransformChain(param.reslice_param.transforms, ref_space, warp);
+  ReadTransformChain(param.reslice_param.transforms, ref, warp);
 
   // Write the composite warp if requested
   if(r_param.out_composed_warp.size())
     {
-    LDDMMType::vimg_write(warp.GetPointer(), r_param.out_composed_warp.c_str(),
-                          itk::ImageIOBase::FLOAT);
+    WriteImageViaCache(warp.GetPointer(), r_param.out_composed_warp.c_str(), itk::ImageIOBase::FLOAT);
     }
 
   // Compute the Jacobian of the warp if requested
@@ -2582,8 +1974,7 @@ int GreedyApproach<VDim, TReal>
     LDDMMType::alloc_img(iTemp, warp);
     LDDMMType::field_jacobian_det(warp, iTemp);
 
-    LDDMMType::img_write(iTemp, r_param.out_jacobian_image.c_str(),
-                         itk::ImageIOBase::FLOAT);
+    WriteImageViaCache(iTemp.GetPointer(), r_param.out_jacobian_image.c_str(), itk::ImageIOBase::FLOAT);
     }
 
 
@@ -2595,7 +1986,7 @@ int GreedyApproach<VDim, TReal>
     // Handle the special case of multi-label images
     if(r_param.images[i].interp.mode == InterpSpec::LABELWISE)
       {
-      // The label image assumed to be an image of shorts
+      // The label image assumed to be an image of shortsC
       typedef itk::Image<short, VDim> LabelImageType;
       typedef itk::ImageFileReader<LabelImageType> LabelReaderType;
 
@@ -2684,21 +2075,16 @@ int GreedyApproach<VDim, TReal>
       fltVoting->Update();
 
       // Save
-      typedef itk::ImageFileWriter<LabelImageType> WriterType;
-      typename WriterType::Pointer writer = WriterType::New();
-      writer->SetFileName(r_param.images[i].output.c_str());
-      writer->SetUseCompression(true);
-      writer->SetInput(fltVoting->GetOutput());
-      writer->Update();
+      WriteImageViaCache(fltVoting->GetOutput(), r_param.images[i].output.c_str());
       }
     else
       {
-      // Read the input image
-      CompositeImagePointer moving, warped;
-      itk::ImageIOBase::IOComponentType comp = LDDMMType::cimg_read(filename, moving);
+      // Read the input image and record its type
+      itk::ImageIOBase::IOComponentType comp;
+      CompositeImagePointer moving = ReadImageViaCache<CompositeImageType>(filename, &comp);
 
       // Allocate the warped image
-      LDDMMType::alloc_cimg(warped, ref_space, moving->GetNumberOfComponentsPerPixel());
+      CompositeImagePointer warped = LDDMMType::new_cimg(ref, moving->GetNumberOfComponentsPerPixel());
 
       // Perform the warp
       LDDMMType::interp_cimg(moving, warp, warped,
@@ -2706,7 +2092,7 @@ int GreedyApproach<VDim, TReal>
                              true, r_param.images[i].interp.outside_value);
 
       // Write, casting to the input component type
-      LDDMMType::cimg_write(warped, r_param.images[i].output.c_str(), comp);
+      WriteImageViaCache(warped.GetPointer(), r_param.images[i].output.c_str(), comp);
       }
     }
 
@@ -2715,8 +2101,35 @@ int GreedyApproach<VDim, TReal>
     {
     typedef itk::Mesh<TReal, VDim> MeshType;
     typedef itk::MeshFileReader<MeshType> MeshReader;
-    typename MeshReader::Pointer reader = MeshReader::New();
-    reader->SetFileName(r_param.meshes[i].fixed.c_str());
+    typename MeshType::Pointer mesh;
+
+    if(itksys::SystemTools::GetFilenameExtension(r_param.meshes[i].fixed) == ".csv")
+      {
+      mesh = MeshType::New();
+
+      std::ifstream fin(r_param.meshes[i].fixed.c_str());
+      std::string f_line, f_token;
+      unsigned int n_pts = 0;
+      while(std::getline(fin, f_line))
+        {
+        std::istringstream iss(f_line);
+        itk::Point<TReal, VDim> pt;
+        for(unsigned int a = 0; a < VDim; a++)
+          {
+          if(!std::getline(iss, f_token, ','))
+            throw GreedyException("Error reading CSV file, line %s", f_line.c_str());
+          pt[a] = atof(f_token.c_str());
+          }
+        mesh->SetPoint(n_pts++, pt);
+        }
+      }
+    else
+      {
+      typename MeshReader::Pointer reader = MeshReader::New();
+      reader->SetFileName(r_param.meshes[i].fixed.c_str());
+      reader->Update();
+      mesh = reader->GetOutput();
+      }
 
     typedef WarpMeshTransformFunctor<VDim, TReal> TransformType;
     typename TransformType::Pointer transform = TransformType::New();
@@ -2726,13 +2139,29 @@ int GreedyApproach<VDim, TReal>
     typedef itk::TransformMeshFilter<MeshType, MeshType, TransformType> FilterType;
     typename FilterType::Pointer filter = FilterType::New();
     filter->SetTransform(transform);
-    filter->SetInput(reader->GetOutput());
+    filter->SetInput(mesh);
+    filter->Update();
 
-    typedef itk::MeshFileWriter<MeshType> MeshWriter;
-    typename MeshWriter::Pointer writer = MeshWriter::New();
-    writer->SetInput(filter->GetOutput());
-    writer->SetFileName(r_param.meshes[i].output.c_str());
-    writer->Update();
+    mesh = filter->GetOutput();
+
+    if(itksys::SystemTools::GetFilenameExtension(r_param.meshes[i].output) == ".csv")
+      {
+      std::ofstream out(r_param.meshes[i].output.c_str());
+      for(unsigned int i = 0; i < mesh->GetNumberOfPoints(); i++)
+        {
+        itk::Point<TReal, VDim> pt = mesh->GetPoint(i);
+        for(unsigned int a = 0; a < VDim; a++)
+          out << pt[a] << (a < VDim-1 ? "," : "\n");
+        }
+      }
+    else
+      {
+      typedef itk::MeshFileWriter<MeshType> MeshWriter;
+      typename MeshWriter::Pointer writer = MeshWriter::New();
+      writer->SetInput(mesh);
+      writer->SetFileName(r_param.meshes[i].output.c_str());
+      writer->Update();
+      }
     }
 
 
@@ -2781,6 +2210,8 @@ template <unsigned int VDim, typename TReal>
 int GreedyApproach<VDim, TReal>
 ::RunAlignMoments(GreedyParameters &param)
 {
+  typedef PhysicalSpaceAffineCostFunction<VDim, TReal> PhysicalSpaceAffineCostFunction;
+
   // Create an optical flow helper object
   OFHelperType of_helper;
 
@@ -2947,9 +2378,18 @@ int GreedyApproach<VDim, TReal>
 
 template <unsigned int VDim, typename TReal>
 void GreedyApproach<VDim, TReal>
-::AddCachedInputObject(std::string &string, itk::Object *object)
+::AddCachedInputObject(std::string key, itk::Object *object)
 {
-  m_ImageCache[string] = object;
+  m_ImageCache[key].target = object;
+  m_ImageCache[key].force_write = false;
+}
+
+template <unsigned int VDim, typename TReal>
+void GreedyApproach<VDim, TReal>
+::AddCachedOutputObject(std::string key, itk::Object *object, bool force_write)
+{
+  m_ImageCache[key].target = object;
+  m_ImageCache[key].force_write = force_write;
 }
 
 template <unsigned int VDim, typename TReal>
@@ -2960,10 +2400,44 @@ GreedyApproach<VDim,TReal>
   return m_MetricLog;
 }
 
+template<unsigned int VDim, typename TReal>
+MultiComponentMetricReport GreedyApproach<VDim, TReal>
+::GetLastMetricReport() const
+{
+  // Find last non-empty result
+  for(int k = m_MetricLog.size()-1; k >= 0; --k)
+    {
+    if(m_MetricLog[k].size())
+      return m_MetricLog[k].back();
+    }
+
+  // If empty, throw exception
+  throw GreedyException("Metric log is empty in GetLastMetricValue()");
+  return MultiComponentMetricReport();
+}
+
 template <unsigned int VDim, typename TReal>
+void GreedyApproach<VDim, TReal>
+::ConfigThreads(const GreedyParameters &param)
+{
+  if(param.threads > 0)
+    {
+    std::cout << "Limiting the number of threads to " << param.threads << std::endl;
+    itk::MultiThreader::SetGlobalMaximumNumberOfThreads(param.threads);
+    }
+  else
+    {
+    std::cout << "Executing with the default number of threads: " << itk::MultiThreader::GetGlobalDefaultNumberOfThreads() << std::endl;
+
+    }
+}
+
+template<unsigned int VDim, typename TReal>
 int GreedyApproach<VDim, TReal>
 ::Run(GreedyParameters &param)
 {
+  ConfigThreads(param);
+
   switch(param.mode)
     {
     case GreedyParameters::GREEDY:

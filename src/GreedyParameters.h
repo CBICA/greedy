@@ -32,11 +32,19 @@
 #include <vnl/vnl_matrix.h>
 #include <vnl/vnl_vector.h>
 
+class CommandLineHelper;
+
 struct ImagePairSpec
 {
   std::string fixed;
   std::string moving;
   double weight;
+
+  ImagePairSpec(std::string in_fixed, std::string in_moving, double in_weight = 1.0)
+    : fixed(in_fixed), moving(in_moving), weight(in_weight) {}
+
+  ImagePairSpec()
+    : weight(1.0) {}
 };
 
 struct SmoothingParameters
@@ -47,13 +55,22 @@ struct SmoothingParameters
   SmoothingParameters() : sigma(0.0), physical_units(true) {}
 };
 
+enum RigidSearchRotationMode
+{
+  RANDOM_NORMAL_ROTATION,
+  ANY_ROTATION,
+  ANY_ROTATION_AND_FLIP
+};
+
 struct RigidSearchSpec
 {
+  RigidSearchRotationMode mode;
   int iterations;
   double sigma_xyz;
   double sigma_angle;
 
-  RigidSearchSpec() : iterations(0), sigma_xyz(0.0), sigma_angle(0.0) {}
+  RigidSearchSpec() : mode(RANDOM_NORMAL_ROTATION),
+    iterations(0), sigma_xyz(0.0), sigma_angle(0.0) {}
 };
 
 struct InterpSpec
@@ -72,6 +89,11 @@ struct ResliceSpec
   std::string moving;
   std::string output;
   InterpSpec interp;
+
+  ResliceSpec(const std::string &in_moving = "",
+              const std::string &in_output = "",
+              InterpSpec in_interp =  InterpSpec())
+    : moving(in_moving), output(in_output), interp(in_interp) {}
 };
 
 struct ResliceMeshSpec
@@ -87,6 +109,10 @@ struct TransformSpec
 
   // Optional exponent (-1 for inverse, 0.5 for square root)
   double exponent;
+
+  // Constructor
+  TransformSpec(const std::string in_filename = std::string(), double in_exponent = 1.0)
+    : filename(in_filename), exponent(in_exponent) {}
 };
 
 enum AffineInitMode
@@ -137,6 +163,44 @@ struct GreedyWarpRootParameters
   std::string in_warp, out_warp;
 };
 
+template <class TAtomic>
+class PerLevelSpec
+{
+public:
+  PerLevelSpec() : m_UseCommon(false) {}
+  PerLevelSpec(TAtomic common_value) { *this = common_value; }
+  PerLevelSpec(std::vector<TAtomic> per_level_value) { *this = per_level_value; }
+
+  TAtomic operator [] (unsigned int pos) const
+  {
+    return m_UseCommon ? m_CommonValue : m_ValueArray.at(pos);
+  }
+
+  PerLevelSpec<TAtomic> & operator = (TAtomic value)
+  {
+    m_CommonValue = value; m_UseCommon = true;
+    return *this;
+  }
+
+  PerLevelSpec<TAtomic> & operator = (std::vector<TAtomic> per_level_value)
+  {
+    if(per_level_value.size() == 1)
+      return (*this = per_level_value[0]);
+
+    m_ValueArray = per_level_value; m_UseCommon = false;
+    return *this;
+  }
+
+  bool CheckSize(unsigned int n_Levels) const
+  {
+    return m_UseCommon || m_ValueArray.size() == n_Levels;
+  }
+
+protected:
+  TAtomic m_CommonValue;
+  std::vector<TAtomic> m_ValueArray;
+  bool m_UseCommon;
+};
 
 struct GreedyParameters
 {
@@ -184,7 +248,7 @@ struct GreedyParameters
   TimeStepMode time_step_mode;
 
   // Iterations per level (i.e., 40x40x100)
-  std::vector<double> epsilon_per_level;
+  PerLevelSpec<double> epsilon_per_level;
   
   std::vector<int> iter_per_level;
 
@@ -205,6 +269,9 @@ struct GreedyParameters
 
   // Mask for gradient computation (fixed mask)
   std::string gradient_mask;
+
+  // Trim for the gradient mask
+  std::vector<int> gradient_mask_trim_radius;
 
   // Mask for the moving image
   std::string moving_mask;
@@ -239,7 +306,19 @@ struct GreedyParameters
   // Floating point precision?
   bool flag_float_math;
 
+  // Weight applied to new image pairs
+  double current_weight;
+
+  // Interpolation applied to new reslice image pairs
+  InterpSpec current_interp;
+
   static void SetToDefaults(GreedyParameters &param);
+
+  // Read parameters from the
+  bool ParseCommandLine(const std::string &cmd, CommandLineHelper &cl);
+
+  // Constructor
+  GreedyParameters() { SetToDefaults(*this); }
 };
 
 
