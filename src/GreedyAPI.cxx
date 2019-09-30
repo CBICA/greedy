@@ -53,7 +53,7 @@
 #include <vnl/vnl_trace.h>
 #include <vnl/vnl_numeric_traits.h>
 
-
+#include "AffineTransformUtilities.h"
 
 
 

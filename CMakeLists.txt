@@ -190,18 +190,9 @@ IF(BUILD_CLI)
     TARGET_LINK_LIBRARIES(stack_greedy greedyapi ${ITK_LIBRARIES} ${FFTWF_LIB} ${FFTWF_THREADS_LIB})
     ADD_DEPENDENCIES(stack_greedy docs_to_hex)
   ENDIF()
-ADD_EXECUTABLE(greedy ${GREEDY_SRC})
-TARGET_LINK_LIBRARIES(greedy greedyapi ${ITK_LIBRARIES} ${FFTWF_LIB} ${FFTWF_THREADS_LIB})
-INSTALL(TARGETS greedy DESTINATION bin COMPONENT Runtime)
 
   ADD_EXECUTABLE(greedy ${GREEDY_SRC})
   TARGET_LINK_LIBRARIES(greedy greedyapi ${ITK_LIBRARIES} ${FFTWF_LIB} ${FFTWF_THREADS_LIB})
-ADD_EXECUTABLE(greedywrapper src/GreedyWrapper.cxx src/cbicaCmdParser.cpp src/cbicaUtilities.cpp)
-INSTALL(TARGETS greedywrapper DESTINATION bin COMPONENT Runtime)
-
-ADD_EXECUTABLE(test_accum testing/src/TestOneDimensionalInPlaceAccumulateFilter.cxx)
-TARGET_LINK_LIBRARIES(test_accum ${ITK_LIBRARIES})
-
   ADD_EXECUTABLE(test_accum testing/src/TestOneDimensionalInPlaceAccumulateFilter.cxx)
   TARGET_LINK_LIBRARIES(test_accum ${ITK_LIBRARIES})
 ENDIF(BUILD_CLI)
