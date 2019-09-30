@@ -53,8 +53,6 @@
 #include <vnl/vnl_trace.h>
 #include <vnl/vnl_numeric_traits.h>
 
-#include "AffineTransformUtilities.h"
-
 
 
 // Helper function to get the RAS coordinate of the center of 

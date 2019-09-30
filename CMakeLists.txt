@@ -77,29 +77,29 @@ INCLUDE_DIRECTORIES(
 # # an embeddable version. Build our own copy of hexdump
 # # to ensure consistent behavior and portability.
 # # See http://25thandclement.com/~william/projects/hexdump.c.html
-ADD_EXECUTABLE(text_to_hex utilities/hexdump.c)
-SET_PROPERTY(TARGET text_to_hex APPEND PROPERTY COMPILE_DEFINITIONS "HEXDUMP_MAIN")
+#ADD_EXECUTABLE(text_to_hex utilities/hexdump.c)
+#SET_PROPERTY(TARGET text_to_hex APPEND PROPERTY COMPILE_DEFINITIONS "HEXDUMP_MAIN")
 
 # List of docs that we want to generate
-SET(HARDCODED_DOCS
-  stackg_usage_main stackg_usage_init stackg_usage_recon
-  stackg_usage_volmatch stackg_usage_voliter stackg_usage_splat)
-
-UNSET(HARDCODED_DOCS_HEADERS)
-FOREACH(doc ${HARDCODED_DOCS})
-
-  ADD_CUSTOM_COMMAND(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${doc}.h
-    COMMAND text_to_hex -i ${CMAKE_CURRENT_SOURCE_DIR}/docs/usage/${doc}.txt > ${CMAKE_CURRENT_BINARY_DIR}/${doc}.h
-    DEPENDS text_to_hex ${CMAKE_CURRENT_SOURCE_DIR}/docs/usage/${doc}.txt)
-
-  SET(HARDCODED_DOCS_HEADERS ${HARDCODED_DOCS_HEADERS} ${CMAKE_CURRENT_BINARY_DIR}/${doc}.h)
-
-ENDFOREACH()
+#SET(HARDCODED_DOCS
+#  stackg_usage_main stackg_usage_init stackg_usage_recon
+#  stackg_usage_volmatch stackg_usage_voliter stackg_usage_splat)
+#
+#UNSET(HARDCODED_DOCS_HEADERS)
+#FOREACH(doc ${HARDCODED_DOCS})
+#
+#  ADD_CUSTOM_COMMAND(
+#    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${doc}.h
+#    COMMAND text_to_hex -i ${CMAKE_CURRENT_SOURCE_DIR}/docs/usage/${doc}.txt > #${CMAKE_CURRENT_BINARY_DIR}/${doc}.h
+#    DEPENDS text_to_hex ${CMAKE_CURRENT_SOURCE_DIR}/docs/usage/${doc}.txt)
+#
+#  SET(HARDCODED_DOCS_HEADERS ${HARDCODED_DOCS_HEADERS} ${CMAKE_CURRENT_BINARY_DIR}/${doc}.h)
+#
+#ENDFOREACH()
 
 INCLUDE_DIRECTORIES(${CMAKE_CURRENT_BINARY_DIR})
 
-ADD_CUSTOM_TARGET(docs_to_hex ALL DEPENDS ${HARDCODED_DOCS_HEADERS})
+#ADD_CUSTOM_TARGET(docs_to_hex ALL DEPENDS ${HARDCODED_DOCS_HEADERS})
 
 #--------------------------------------------------------------------------------
 # Source file specification
@@ -193,8 +193,8 @@ IF(BUILD_CLI)
 
   ADD_EXECUTABLE(greedy ${GREEDY_SRC})
   TARGET_LINK_LIBRARIES(greedy greedyapi ${ITK_LIBRARIES} ${FFTWF_LIB} ${FFTWF_THREADS_LIB})
-  ADD_EXECUTABLE(test_accum testing/src/TestOneDimensionalInPlaceAccumulateFilter.cxx)
-  TARGET_LINK_LIBRARIES(test_accum ${ITK_LIBRARIES})
+  #ADD_EXECUTABLE(test_accum testing/src/TestOneDimensionalInPlaceAccumulateFilter.cxx)
+  #TARGET_LINK_LIBRARIES(test_accum ${ITK_LIBRARIES})
 ENDIF(BUILD_CLI)
 
 # Install command-line executables
