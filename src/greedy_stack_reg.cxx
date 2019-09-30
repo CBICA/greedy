@@ -98,11 +98,15 @@ struct SplatParameters
   // Background values
   std::vector<double> background;
 
+  // In-plane sigma
+  double sigma_inplane;
+
   SplatParameters()
     : z_first(0.0), z_last(0.0), z_step(0.0),
       source_stage(RAW), source_iter(0),
       mode(EXACT), z_exact_tol(1e-6), sigma(0.0),
-      ignore_alt_headers(false), background(1, 0.0) {}
+      ignore_alt_headers(false), background(1, 0.0),
+      sigma_inplane(0.0) {}
 };
 
 
@@ -273,7 +277,7 @@ public:
   /** Set of enums used to refer to files in the project directory */
   enum FileIntent {
     MANIFEST_FILE = 0, CONFIG_ENTRY, AFFINE_MATRIX, METRIC_VALUE, ACCUM_MATRIX, ACCUM_RESLICE,
-    VOL_INIT_MATRIX, VOL_SLIDE, VOL_MASK_SLIDE, VOL_MEDIAN_INIT_MATRIX,
+    VOL_INIT_MATRIX, VOL_SLIDE, VOL_MASK_SLIDE, VOL_BEST_INIT_MATRIX,
     VOL_ITER_MATRIX, VOL_ITER_WARP, ITER_METRIC_DUMP
   };
 
@@ -340,7 +344,7 @@ public:
       // Read the values from the manifest
       std::istringstream iss(f_line);
       SliceData slice;
-      if(!(iss >> slice.unique_id >> slice.z_pos >> slice.raw_filename))
+      if(!(iss >> slice.unique_id >> slice.z_pos >> slice.is_leader >> slice.raw_filename))
         throw GreedyException("Error reading manifest file, line '%s'", f_line.c_str());
 
       // Check that the manifest points to a real file
@@ -368,7 +372,7 @@ public:
   {
     std::ofstream fout(fn_manifest);
     for(auto slice : m_Slices)
-      fout << slice.unique_id << " " << slice.z_pos << " " << slice.raw_filename << std::endl;
+      fout << slice.unique_id << " " << slice.z_pos << " " << slice.is_leader << slice.raw_filename << std::endl;
   }
 
   void ReconstructStack(double z_range, double z_epsilon, const GreedyParameters &gparam)
@@ -380,6 +384,13 @@ public:
     this->SaveConfigKey("Z_Range", z_range);
     this->SaveConfigKey("Z_Epsilon", z_epsilon);
 
+    // This array represents the slice graph structure. Each slice uses one or more
+    // neighbors as references for registration. However, some of the slices are
+    // leaders and some are followers. The follower slices use leader slices as 
+    // references, but leader slices ignore the follower slices. In the graph,
+    // we represent this by having edges from reference images to moving images,
+    // thus edges L->F, L->L but not F->F or F->L
+
     // We keep for each slice the list of z-sorted neigbors
     std::vector<slice_ref_set> slice_nbr(m_Slices.size());
     unsigned int n_edges = 0;
@@ -387,36 +398,40 @@ public:
     // Forward pass
     for(auto it = m_SortedSlices.begin(); it != m_SortedSlices.end(); ++it)
       {
-      // Add at least the following slice
-      auto it_next = it; ++it_next;
-      unsigned int n_added = 0;
-
-      // Now add all the slices in the range
-      while(it_next != m_SortedSlices.end()
-            && (n_added < 1 || fabs(it->first - it_next->first) < z_range))
+      // If this slide is a follower, don't add any neighbors
+      if(m_Slices[it->second].is_leader)
         {
-        slice_nbr[it->second].insert(*it_next);
-        n_added++;
-        ++it_next;
-        n_edges++;
+        // Add at least the following slice
+        auto it_next = it; ++it_next;
+        unsigned int n_added = 0;
+
+        // Now add all the slices in the range
+        while(it_next != m_SortedSlices.end()
+          && (n_added < 1 || fabs(it->first - it_next->first) < z_range))
+          {
+          slice_nbr[it->second].insert(*it_next);
+          n_added++; n_edges++; ++it_next;
+          }
         }
       }
 
-    // Forward pass
+    // Backward pass
     for(auto it = m_SortedSlices.rbegin(); it != m_SortedSlices.rend(); ++it)
       {
-      // Add at least the following slice
-      auto it_next = it; ++it_next;
-      unsigned int n_added = 0;
-
-      // Now add all the slices in the range
-      while(it_next != m_SortedSlices.rend()
-            && (n_added < 1 || fabs(it->first - it_next->first) < z_range))
+      // If this slide is a follower, don't add any neighbors
+      if(m_Slices[it->second].is_leader)
         {
-        slice_nbr[it->second].insert(*it_next);
-        n_added++;
-        ++it_next;
-        n_edges++;
+        // Add at least the following slice
+        auto it_next = it; ++it_next;
+        unsigned int n_added = 0;
+
+        // Now add all the slices in the range
+        while(it_next != m_SortedSlices.rend()
+              && (n_added < 1 || fabs(it->first - it_next->first) < z_range))
+          {
+          slice_nbr[it->second].insert(*it_next);
+          n_added++; n_edges++; ++it_next;
+          }
         }
       }
 
@@ -447,6 +462,10 @@ public:
     // far behind in z to be included for the current 'reference' image
     for(auto it : m_SortedSlices)
       {
+      // Skip the slide if it is a follower (followers are not used as reference slices)
+      if(!m_Slices[it.second].is_leader)
+        continue;
+
       const auto &nbr = slice_nbr[it.second];
 
       // Read the reference slide from the cache
@@ -523,21 +542,28 @@ public:
 
     // Compute the shortest paths from every slice to the rest and record the total distance. This will
     // help generate the root of the tree
-    unsigned int i_root = 0;
+    int i_root = -1;
     double best_root_dist = 0.0;
     for(unsigned int i = 0; i < m_Slices.size(); i++)
       {
-      dijkstra.ComputePathsFromSource(i);
-      double root_dist = 0.0;
-      for(unsigned int j = 0; j < m_Slices.size(); j++)
-        root_dist += dijkstra.GetDistanceArray()[j];
-      std::cout << "Root distance " << i << " : " << root_dist << std::endl;
-      if(i == 0 || best_root_dist > root_dist)
+      if(m_Slices[i].is_leader) 
         {
-        i_root = i;
-        best_root_dist = root_dist;
+        dijkstra.ComputePathsFromSource(i);
+        double root_dist = 0.0;
+        for(unsigned int j = 0; j < m_Slices.size(); j++)
+          root_dist += dijkstra.GetDistanceArray()[j];
+        std::cout << "Root distance " << i << " : " << root_dist << std::endl;
+        if(i_root < 0 || best_root_dist > root_dist)
+          {
+          i_root = i;
+          best_root_dist = root_dist;
+          }
         }
       }
+
+    // No root? We have a problem
+    if(i_root < 0)
+      throw GreedyException("No root found for the registration graph. Did you specify any leader slices in the manifest?");
 
     // Store the root for reference
     SaveConfigKey("RootSlide", m_Slices[i_root].unique_id);
@@ -724,74 +750,114 @@ public:
         // Write the 2d slice
         LDDMMType::cimg_write(vol_slice_2d, fn_vol_slide.c_str());
 
-        // Try registration between resliced slide and corresponding volume slice with
-        // a brute force search. This will be used to create a median transformation
-        // between slide space and volume space. Since the volume may come with a mask,
-        // we use volume slice as fixed, and the slide image as moving
+        // Only consider leader slides for matching to volume
+        if(m_Slices[i].is_leader)
+          {
+          // Try registration between resliced slide and corresponding volume slice with
+          // a brute force search. This will be used to create a median transformation
+          // between slide space and volume space. Since the volume may come with a mask,
+          // we use volume slice as fixed, and the slide image as moving
+          GreedyAPI greedy_api;
+          GreedyParameters my_param = gparam;
+
+          // Set up the image pair for registration
+          std::string fn_accum_reslice = GetFilenameForSlice(m_Slices[i], ACCUM_RESLICE);
+
+          ImagePairSpec img_pair("vol_slice", fn_accum_reslice, 1.0);
+          greedy_api.AddCachedInputObject("vol_slice", vol_slice_2d.GetPointer());
+          my_param.inputs.push_back(img_pair);
+
+          // Handle the mask
+          if(fn_vol_mask_slide.length())
+            {
+            // TODO: we are not caching because of different image types
+            SlideImagePointer mask_slice_2d = ExtractSliceFromVolume(mask, m_Slices[i].z_pos);
+            LDDMMType::cimg_write(mask_slice_2d, fn_vol_mask_slide.c_str());
+            my_param.gradient_mask = fn_vol_mask_slide;
+            }
+
+          // Set other parameters
+          my_param.affine_dof = GreedyParameters::DOF_AFFINE;
+          my_param.affine_init_mode = IMG_CENTERS;
+
+          // Set up the output of the affine
+          my_param.output = fn_vol_init_matrix;
+
+          // Run the affine registration
+          greedy_api.RunAffine(my_param);
+          }
+        }
+      }
+
+    // Now we have a large set of per-slice matrices. We next try each matrix on each pair of
+    // slices and store the metric, with the goal of finding a matrix that will provide the 
+    // best possible match.
+    std::vector<double> accum_metric(m_Slices.size(), 0.0);
+    for(unsigned int i = 0; i < m_Slices.size(); i++)
+      {
+      if(!m_Slices[i].is_leader)
+        continue;
+
+      // Load the images to avoid N^2 IO operations
+      LDDMMType::CompositeImagePointer vol_slice = 
+        LDDMMType::cimg_read(GetFilenameForSlice(m_Slices[i], VOL_SLIDE).c_str());
+
+      LDDMMType::CompositeImagePointer acc_slice = 
+        LDDMMType::cimg_read(GetFilenameForSlice(m_Slices[i], ACCUM_RESLICE).c_str());
+
+      // Loop over matrices
+      for(unsigned int k = 0; k < m_Slices.size(); k++)
+        {
+        if(!m_Slices[k].is_leader)
+          continue;
+
+        // This API is for metric computation
         GreedyAPI greedy_api;
         GreedyParameters my_param = gparam;
 
-        // Set up the image pair for registration
-        std::string fn_accum_reslice = GetFilenameForSlice(m_Slices[i], ACCUM_RESLICE);
-
-        ImagePairSpec img_pair("vol_slice", fn_accum_reslice, 1.0);
-        greedy_api.AddCachedInputObject("vol_slice", vol_slice_2d.GetPointer());
+        // Same image pairs as before
+        ImagePairSpec img_pair("vol_slice", "acc_slice", 1.0);
+        greedy_api.AddCachedInputObject("vol_slice", vol_slice.GetPointer());
+        greedy_api.AddCachedInputObject("acc_slice", acc_slice.GetPointer());
         my_param.inputs.push_back(img_pair);
 
-        // Handle the mask
-        if(fn_vol_mask_slide.length())
-          {
-          // TODO: we are not caching because of different image types
-          SlideImagePointer mask_slice_2d = ExtractSliceFromVolume(mask, m_Slices[i].z_pos);
-          LDDMMType::cimg_write(mask_slice_2d, fn_vol_mask_slide.c_str());
-          my_param.gradient_mask = fn_vol_mask_slide;
-          }
+        // TODO: this is really bad, can't cache mask images
+        if(fn_mask.length())
+          my_param.gradient_mask = GetFilenameForSlice(m_Slices[i], VOL_MASK_SLIDE);
 
         // Set other parameters
-        my_param.affine_dof = GreedyParameters::DOF_AFFINE;
-        my_param.affine_init_mode = IMG_CENTERS;
+        my_param.affine_init_mode = RAS_FILENAME;
+        my_param.affine_init_transform = GetFilenameForSlice(m_Slices[k], VOL_INIT_MATRIX);
 
-        // Set up the output of the affine
-        my_param.output = fn_vol_init_matrix;
-
-        // Run the affine registration
-        greedy_api.RunAffine(my_param);
+        // Run affine to get the metric value
+        MultiComponentMetricReport metric_report;
+        greedy_api.ComputeMetric(my_param, metric_report);
+        printf("Slide %03d matrix %03d metric %8.4f\n", i, k, metric_report.TotalMetric);
+        accum_metric[k] += metric_report.TotalMetric;
         }
       }
 
-    // List of affine matrices to the volume slice
-    typedef vnl_matrix_fixed<double, 3, 3> Mat3;
-    std::vector<Mat3> vol_affine(m_Slices.size());
-    for(unsigned int i = 0; i < m_Slices.size(); i++)
+    // Now find the matrix with the best overall metric
+    int k_best = -1; double m_best = 0.0;
+    for(unsigned int k = 0; k < m_Slices.size(); k++)
       {
-      std::string fn_vol_init_matrix = GetFilenameForSlice(m_Slices[i], VOL_INIT_MATRIX);
-      vol_affine[i] = GreedyAPI::ReadAffineMatrix(TransformSpec(fn_vol_init_matrix));
-      }
+      if(!m_Slices[k].is_leader) 
+        continue;
 
-    // Compute distances between all pairs of affine matrices
-    vnl_matrix<double> aff_dist(m_Slices.size(), m_Slices.size()); aff_dist.fill(0.0);
-    for(unsigned int i = 0; i < m_Slices.size(); i++)
-      {
-      for(unsigned int j = 0; j < i; j++)
+      printf("Across-slice metric for matrix %04d: %8.4f\n", k, accum_metric[k]);
+      if(k_best < 0 || accum_metric[k] > m_best) 
         {
-        aff_dist(i,j) = (vol_affine[i] - vol_affine[j]).array_one_norm();
-        aff_dist(j,i) = aff_dist(i,j);
+        k_best = k;
+        m_best = accum_metric[k];
         }
       }
-
-    // Compute the sum of distances from each matrix to the rest
-    vnl_vector<double> row_sums = aff_dist * vnl_vector<double>(m_Slices.size(), 1.0);
-
-    // Find the index of the smallest element
-    unsigned int idx_best =
-        std::find(row_sums.begin(), row_sums.end(), row_sums.min_value()) -
-        row_sums.begin();
 
     // The median affine
-    Mat3 median_affine = vol_affine[idx_best];
+    vnl_matrix<double> M_best =
+      GreedyAPI::ReadAffineMatrix(GetFilenameForSlice(m_Slices[k_best], VOL_INIT_MATRIX));
 
     // Write the median affine to a file
-    GreedyAPI::WriteAffineMatrix(GetFilenameForGlobal(VOL_MEDIAN_INIT_MATRIX), median_affine);
+    GreedyAPI::WriteAffineMatrix(GetFilenameForGlobal(VOL_BEST_INIT_MATRIX), M_best);
 
     // Now write the complete initial to-volume transform for each slide
     for(unsigned int i = 0; i < m_Slices.size(); i++)
@@ -799,7 +865,7 @@ public:
       vnl_matrix<double> M_root =
           GreedyAPI::ReadAffineMatrix(GetFilenameForSlice(m_Slices[i], ACCUM_MATRIX));
 
-      vnl_matrix<double> M_vol = M_root * median_affine;
+      vnl_matrix<double> M_vol = M_root * M_best;
 
       GreedyAPI::WriteAffineMatrix(
             GetFilenameForSlice(m_Slices[i], VOL_ITER_MATRIX, 0), M_vol);
@@ -877,17 +943,30 @@ public:
         // like allowing a z-range for adjacent slices registration, modulating weight by the
         // distance, and detecting and down-weighting 'bad' slices. For now just pick the slices
         // immediately below and above the current slice
-        auto itf = m_SortedSlices.find(std::make_pair(m_Slices[k].z_pos, k));
-        if(itf == m_SortedSlices.end())
-          throw GreedyException("Slice not found in sorted list (%d, z = %f)", k, m_Slices[k].z_pos);
-
-        // Go backward and forward one slice
+        //
+        // Correction (Sep 2019): we now search for the adjacent leader slices. Non-leader slices
+        // are not used as they are assumed to be less reliable
         slice_ref_set k_nbr;
-        auto itf_back = itf, itf_fore = itf;
-        if(itf != m_SortedSlices.begin())
-          k_nbr.insert(*(--itf_back));
-        if((++itf_fore) != m_SortedSlices.end())
-          k_nbr.insert(*itf_fore);
+
+        // Find slice before k that is a leader slice
+        for(auto itr = m_SortedSlices.rbegin(); itr != m_SortedSlices.rend(); itr++)
+          {
+          if(itr->first < m_Slices[k].z_pos && m_Slices[itr->second].is_leader)
+            {
+            k_nbr.insert(*itr);
+            break;
+            }
+          }
+
+        // Find slice after k that is a leader slice
+        for(auto itf = m_SortedSlices.begin(); itf != m_SortedSlices.end(); itf++)
+          {
+          if(itf->first > m_Slices[k].z_pos && m_Slices[itf->second].is_leader)
+            {
+            k_nbr.insert(*itf);
+            break;
+            }
+          }
 
         // Create the greedy API for the main registration task
         GreedyAPI api_reg;
@@ -1176,6 +1255,15 @@ public:
         LDDMMType::CompositeImagePointer img_source =
             icache.GetImage<LDDMMType::CompositeImageType>(fn_source);
 
+        // Smooth the image if needed
+        if(sparam.sigma_inplane > 0.0)
+          {
+          LDDMMType::Vec sigma_phys;
+          for(unsigned int a = 0; a < 2; a++)
+            sigma_phys[a] = sparam.sigma_inplane * img_source->GetSpacing()[a];
+          LDDMMType::cimg_smooth(img_source, img_source, sigma_phys);
+          }
+
         // Should we override the image header?
         if(fn_source != m_Slices[i_slice].raw_filename && sparam.ignore_alt_headers)
           {
@@ -1340,6 +1428,7 @@ private:
     std::string raw_filename;
     std::string unique_id;
     double z_pos;
+    bool is_leader;
   };
 
   // Path to the project
@@ -1445,8 +1534,8 @@ private:
 
     switch(intent)
       {
-      case VOL_MEDIAN_INIT_MATRIX:
-        sprintf(filename, "%s/vol/match/affine_refvol_median.mat", dir);
+      case VOL_BEST_INIT_MATRIX:
+        sprintf(filename, "%s/vol/match/affine_refvol_best.mat", dir);
         break;
       case MANIFEST_FILE:
         sprintf(filename, "%s/config/manifest.txt", dir);
@@ -1727,6 +1816,10 @@ void splat(StackParameters &param, CommandLineHelper &cl)
     else if(arg == "-H")
       {
       sparam.ignore_alt_headers = true;
+      }
+    else if(arg == "-si")
+      {
+      sparam.sigma_inplane = cl.read_double();
       }
     else if(greedy_cmd.find(arg) != greedy_cmd.end())
       {

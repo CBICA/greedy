@@ -98,6 +98,8 @@ public:
 
   int RunJacobian(GreedyParameters &param);
 
+  int ComputeMetric(GreedyParameters &param, MultiComponentMetricReport &metric_report);
+
   /**
    * Add an image that is already in memory to the internal cache, and
    * associate it with a filename. This provides a way for images already
