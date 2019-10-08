@@ -1259,8 +1259,9 @@ int GreedyApproach<VDim, TReal>
       std::cout << "Index 24x24x24 maps to " << uk->GetPixel(test) << std::endl;
       }
 
-    if(uLevel.IsNotNull())
-      LDDMMType::vimg_write(uLevel, "/tmp/ulevel.nii.gz");
+    if (uLevel.IsNotNull())
+      //LDDMMType::vimg_write(uLevel, "/tmp/ulevel.nii.gz");
+      std::cout << "uLevel present but not writing image.\n";
 
     // Iterate for this level
     for(unsigned int iter = 0; iter < param.iter_per_level[level]; iter++)
