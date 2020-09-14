@@ -97,6 +97,8 @@ public:
   int RunAlignMoments(GreedyParameters &param);
 
   int RunJacobian(GreedyParameters &param);
+  
+  int RunMetric(GreedyParameters &param);
 
   int ComputeMetric(GreedyParameters &param, MultiComponentMetricReport &metric_report);
 
@@ -153,7 +155,17 @@ public:
 
   static vnl_matrix<double> ReadAffineMatrix(const TransformSpec &ts);
 
+  /**
+   * Helper method to read an affine matrix from file into an ITK transform type
+   */
+  static void ReadAffineTransform(const TransformSpec &ts, LinearTransformType *tran);
+
   static void WriteAffineMatrix(const std::string &filename, const vnl_matrix<double> &Qp);
+
+  /**
+   * Helper method to write an affine ITK transform type to a matrix file
+   */
+  static void WriteAffineTransform(const std::string &filename, LinearTransformType *tran);
 
   static vnl_matrix<double> MapAffineToPhysicalRASSpace(
       OFHelperType &of_helper, int level,
@@ -193,6 +205,8 @@ protected:
   itk::SmartPointer<TImage> ReadImageViaCache(const std::string &filename,
                                               itk::ImageIOBase::IOComponentType *comp_type = NULL);
 
+  template<class TObject> TObject *CheckCache(const std::string &filename) const;
+
   // This function reads an image base object via cache. It is more permissive than using
   // ReadImageViaCache.
   typename ImageBaseType::Pointer ReadImageBaseViaCache(const std::string &filename);
@@ -202,6 +216,10 @@ protected:
   template <class TImage>
   void WriteImageViaCache(TImage *img, const std::string &filename,
                           typename LDDMMType::IOComponentType comp = itk::ImageIOBase::UNKNOWNCOMPONENTTYPE);
+
+  // Write a compressed warp via cache (in float format)
+  void WriteCompressedWarpInPhysicalSpaceViaCache(
+    ImageBaseType *moving_ref_space, VectorImageType *warp, const char *filename, double precision);
 
   void ReadImages(GreedyParameters &param, OFHelperType &ofhelper);
 

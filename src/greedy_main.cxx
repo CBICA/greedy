@@ -75,6 +75,7 @@ int usage()
   printf("  -iw inwarp outwarp     : Invert previously computed warp\n");
   printf("  -root inwarp outwarp N : Convert 2^N-th root of a warp \n");
   printf("  -jac inwarp outjac     : Compute the Jacobian determinant of the warp \n");
+  printf("  -metric                : Compute metric between images\n");
   printf("Options in deformable / affine mode: \n");
   printf("  -w weight              : weight of the next -i pair\n");
   printf("  -m metric              : metric for the entire registration\n");
@@ -92,7 +93,8 @@ int usage()
   printf("                           of the fixed image by given radius. This is useful during affine\n");
   printf("                           registration with the NCC metric when the background of your images\n");
   printf("                           is non-zero. The radius should match that of the NCC metric.");
-  printf("  -mm mask.nii           : mask for the moving image\n");
+  printf("  -fm mask.nii           : metric calculation exclusion mask for the fixed image\n");
+  printf("  -mm mask.nii           : metric calculation exclusion mask for the moving image\n");
   printf("  -it filenames          : sequence of transforms to apply to the moving image first \n");
   printf("Specific to deformable mode: \n");
   printf("  -tscale MODE           : time step behavior mode: CONST, SCALE [def], SCALEDOWN\n");
@@ -115,6 +117,7 @@ int usage()
   printf("                           deformation fields and Jacobians than the pure greedy approach.\n");
   printf("  -svlb                  : Same as -sv but uses the more accurate but also more expensive \n");
   printf("                           update of v, v <- v + u + [v,u]. Experimental feature \n");
+  printf("  -sv-incompr            : Incompressibility mode, implements Mansi et al. 2011 iLogDemons\n");
   printf("  -id image.nii          : Specifies the initial warp to start iteration from. In stationary mode, this \n");
   printf("                           is the initial stationary velocity field (output by -oroot option)\n");
   printf("Initial transform specification: \n");
@@ -150,6 +153,7 @@ int usage()
   printf("  -powell                : use Powell's method instead of LGBFS\n");
   printf("  -float                 : use single precision floating point (off by default)\n");
   printf("  -version               : print version info\n");
+  printf("  -V <level>             : set verbosity level (0: none, 1: default, 2: verbose)\n");
 
   return -1;
 }

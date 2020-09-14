@@ -35,6 +35,7 @@
 #include "itkMultiplyImageFilter.h"
 #include "itkGradientImageFilter.h"
 #include "itkUnaryFunctorImageFilter.h"
+#include "itkBinaryFunctorImageFilter.h"
 #include "itkImageFileReader.h"
 #include "itkImageFileWriter.h"
 #include "itkVectorImage.h"
@@ -453,7 +454,7 @@ LDDMMData<TFloat, VDim>
 template <class TFloat, uint VDim>
 void
 LDDMMData<TFloat, VDim>
-::img_add_in_place(ImagePointer &trg, ImageType *a)
+::img_add_in_place(ImageType *trg, ImageType *a)
 {
   typedef itk::AddImageFilter<ImageType> AddFilter;
   typename AddFilter::Pointer flt = AddFilter::New();
@@ -466,7 +467,7 @@ LDDMMData<TFloat, VDim>
 template <class TFloat, uint VDim>
 void 
 LDDMMData<TFloat, VDim>
-::img_subtract_in_place(ImagePointer &trg, ImageType *a)
+::img_subtract_in_place(ImageType *trg, ImageType *a)
 {
   typedef itk::SubtractImageFilter<ImageType> SubtractFilter;
   typename SubtractFilter::Pointer flt = SubtractFilter::New();
@@ -479,7 +480,7 @@ LDDMMData<TFloat, VDim>
 template <class TFloat, uint VDim>
 void 
 LDDMMData<TFloat, VDim>
-::img_multiply_in_place(ImagePointer &trg, ImageType *a)
+::img_multiply_in_place(ImageType *trg, ImageType *a)
 {
   typedef itk::MultiplyImageFilter<ImageType> MultiplyFilter;
   typename MultiplyFilter::Pointer flt = MultiplyFilter::New();
@@ -874,6 +875,47 @@ LDDMMData<TFloat, VDim>
     }
 }
 
+/** 
+ * Compute the divergence of a vector field.
+ * TODO: this implementation is stupid, splits vector image into components and requires
+ * a working image. Write a proper divergence filter!
+ */
+template <class TFloat, uint VDim>
+void
+LDDMMData<TFloat, VDim>
+::field_divergence(VectorImageType *v, ImageType *div_v, bool use_spacing)
+{
+  // Initialize the divergence to zero
+  div_v->FillBuffer(0.0);
+
+  // Add each component
+  for(int a = 0; a < VDim; a++)
+    {
+    // Extract the a'th component of the displacement field
+    typedef itk::VectorIndexSelectionCastImageFilter<VectorImageType, ImageType> CompFilterType;
+    typename CompFilterType::Pointer comp1 = CompFilterType::New();
+    comp1->SetIndex(a);
+    comp1->SetInput(v);
+
+    // Compute the gradient of this component
+    typedef itk::GradientImageFilter<ImageType, TFloat, TFloat> GradientFilter;
+    typename GradientFilter::Pointer grad = GradientFilter::New();
+    grad->SetInput(comp1->GetOutput());
+    grad->SetUseImageSpacing(use_spacing);
+    grad->SetUseImageDirection(false);
+
+    // Extract the a'th component of the gradient field
+    typedef itk::VectorIndexSelectionCastImageFilter<VectorImageType, ImageType> CompFilterType;
+    typename CompFilterType::Pointer comp2 = CompFilterType::New();
+    comp2->SetIndex(a);
+    comp2->SetInput(grad->GetOutput());
+    comp2->Update();
+
+    // Add the result
+    img_add_in_place(div_v, comp2->GetOutput());
+    }
+}
+
 template <class TFloat, uint VDim>
 class JacobianCompisitionFunctor
 {
@@ -1065,14 +1107,14 @@ LDDMMData<TFloat, VDim>
 template <class TFloat, uint VDim>
 void 
 LDDMMData<TFloat, VDim>
-::image_gradient(ImageType *src, VectorImageType *grad)
+::image_gradient(ImageType *src, VectorImageType *grad, bool use_spacing)
 {
   // Create a gradient image filter
   typedef itk::GradientImageFilter<ImageType, TFloat, TFloat> Filter;
   typename Filter::Pointer flt = Filter::New();
   flt->SetInput(src);
   flt->GraftOutput(grad);
-  flt->SetUseImageSpacingOff();
+  flt->SetUseImageSpacing(use_spacing);
   flt->SetUseImageDirection(false);
   flt->Update();
 }
@@ -1642,6 +1684,9 @@ LDDMMData<TFloat, VDim>
   trg->SetSpacing(spc_post);
   trg->SetDirection(src->GetDirection());
   trg->Allocate();
+  
+  fltSmooth->Update();
+  auto *smooth = fltSmooth->GetOutput();
 
   // Set the image sizes and spacing.
   filter->SetSize(sz);
@@ -1705,6 +1750,77 @@ LDDMMData<TFloat, VDim>
   filter->SetOutsideValue(back);
   filter->Update();
 }
+
+template <class TImage>
+class MaskNaNFunctor
+{
+public:
+  typedef typename TImage::PixelType PixelType;
+  PixelType operator() (const PixelType &x)
+  {
+    return isnan(x) ? 1 : 0;
+  }
+};
+
+
+
+template <class TImage>
+class FilterNaNFunctor
+{
+public:
+  typedef typename TImage::PixelType PixelType;
+  PixelType operator() (const PixelType &x)
+  {
+    return isnan(x) ? 0 : x;
+  }
+};
+
+template<class TFloat, uint VDim>
+void
+LDDMMData<TFloat, VDim>
+::img_filter_nans_in_place(ImageType *src, ImageType *nan_mask)
+{
+  typedef MaskNaNFunctor<ImageType> MaskFunctor;
+  typedef itk::UnaryFunctorImageFilter<ImageType, ImageType, MaskFunctor> MaskFilterType;
+  typename MaskFilterType::Pointer mask = MaskFilterType::New();
+  mask->SetInput(src);
+  mask->GraftOutput(nan_mask);
+  mask->Update();
+
+  typedef FilterNaNFunctor<ImageType> RemoveFunctor;
+  typedef itk::UnaryFunctorImageFilter<ImageType, ImageType, RemoveFunctor> RemoveFilterType;
+  typename RemoveFilterType::Pointer remove = RemoveFilterType::New();
+  remove->SetInput(src);
+  remove->GraftOutput(src);
+  remove->Update();
+}
+
+template <class TImage>
+class ReconstituteNaNFunctor
+{
+public:
+  typedef typename TImage::PixelType PixelType;
+  PixelType operator() (const PixelType &x, const PixelType &m)
+  {
+    return m > 0 ? nan("") : x;
+  }
+};
+
+
+template<class TFloat, uint VDim>
+void
+LDDMMData<TFloat, VDim>
+::img_reconstitute_nans_in_place(ImageType *src, ImageType *nan_mask)
+{
+  typedef ReconstituteNaNFunctor<ImageType> Functor;
+  typedef itk::BinaryFunctorImageFilter<ImageType, ImageType, ImageType, Functor> FilterType;
+  typename FilterType::Pointer filter = FilterType::New();
+  filter->SetInput1(src);
+  filter->SetInput2(nan_mask);
+  filter->GraftOutput(src);
+  filter->Update();
+}
+
 
 template <class TImage>
 struct VoxelToPhysicalFunctor
@@ -1970,7 +2086,7 @@ LDDMMImageMatchingObjective<TFloat, VDim>
     LDDMM::interp_img(p.fix, p.f[m], Jt0); 
 
     // [grad_Jt0_x grad_Jt0_y] = gradient(Jt0);
-    LDDMM::image_gradient(Jt0, GradJt0);
+    LDDMM::image_gradient(Jt0, GradJt0, false);
 
     // pde_rhs_x = detjac_phi_t1 .* (Jt0 - Jt1) .* grad_Jt0_x; 
     // pde_rhs_y = detjac_phi_t1 .* (Jt0 - Jt1) .* grad_Jt0_y; 

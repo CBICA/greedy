@@ -32,6 +32,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cstdarg>
 
 #include "lddmm_common.h"
 #include "lddmm_data.h"
@@ -46,6 +47,7 @@
 #include "MultiImageRegistrationHelper.h"
 #include "FastWarpCompositeImageFilter.h"
 #include "MultiComponentImageMetricBase.h"
+#include "WarpFunctors.h"
 
 #include <vnl/algo/vnl_powell.h>
 #include <vnl/algo/vnl_svd.h>
@@ -53,6 +55,41 @@
 #include <vnl/vnl_trace.h>
 #include <vnl/vnl_numeric_traits.h>
 
+
+// A helper class for printing results. Wraps around printf but
+// takes into account the user's verbose settings
+class GreedyStdOut
+{
+public:
+  GreedyStdOut(GreedyParameters::Verbosity verbosity, FILE *f_out = NULL)
+  : m_Verbosity(verbosity), m_Output(f_out ? f_out : stdout)
+  {
+  }
+  
+  void printf(const char *format, ...)
+  {
+    if(m_Verbosity > GreedyParameters::VERB_NONE)
+      {
+      char buffer[4096];
+      va_list args;
+      va_start (args, format);
+      vsprintf (buffer,format, args);
+      va_end (args);
+      
+      fprintf(m_Output, "%s", buffer);
+      }
+  }
+  
+  void flush()
+  {
+    fflush(m_Output);
+  }
+  
+private:
+  GreedyParameters::Verbosity m_Verbosity;
+  FILE *m_Output;
+  
+};
 
 
 // Helper function to get the RAS coordinate of the center of 
@@ -255,10 +292,51 @@ GreedyApproach<VDim, TReal>
 template<unsigned int VDim, typename TReal>
 void
 GreedyApproach<VDim, TReal>
+::ReadAffineTransform(const TransformSpec &ts, LinearTransformType *out_tran)
+{
+  vnl_matrix<double> Q = ReadAffineMatrix(ts);
+  vnl_matrix<double>  A = Q.extract(VDim, VDim);
+  vnl_vector<double> b = Q.get_column(VDim).extract(VDim);
+
+  typename LinearTransformType::MatrixType tran_A;
+  typename LinearTransformType::OffsetType tran_b;
+
+  vnl_matrix_to_itk_matrix(A, tran_A);
+  vnl_vector_to_itk_vector(b, tran_b);
+
+  out_tran->SetMatrix(tran_A);
+  out_tran->SetOffset(tran_b);
+}
+
+
+
+template<unsigned int VDim, typename TReal>
+void
+GreedyApproach<VDim, TReal>
 ::WriteAffineMatrix(const std::string &filename, const vnl_matrix<double> &Qp)
 {
   GreedyApproach<VDim, TReal> api;
   api.WriteAffineMatrixViaCache(filename, Qp);
+}
+
+template<unsigned int VDim, typename TReal>
+void
+GreedyApproach<VDim, TReal>
+::WriteAffineTransform(const std::string &filename, LinearTransformType *tran)
+{
+  vnl_matrix<double> Q(VDim+1, VDim+1);
+  Q.set_identity();
+
+  for(unsigned int i = 0; i < VDim; i++)
+    {
+    for(unsigned int j = 0; j < VDim; j++)
+      {
+      Q(i,j) = (double) tran->GetMatrix()(i,j);
+      }
+    Q(i,VDim) = (double) tran->GetOffset()[i];
+    }
+
+  WriteAffineMatrix(filename, Q);
 }
 
 template <unsigned int VDim, typename TReal>
@@ -298,6 +376,23 @@ GreedyApproach<VDim, TReal>
 
   itk::SmartPointer<TImage> pointer = reader->GetOutput();
   return pointer;
+}
+
+template <unsigned int VDim, typename TReal>
+template <class TObject>
+TObject *
+GreedyApproach<VDim, TReal>
+::CheckCache(const std::string &filename) const
+{
+  // Check the cache for the presence of the image
+  typename ImageCache::const_iterator it = m_ImageCache.find(filename);
+  if(it != m_ImageCache.end())
+    {
+    itk::Object *cached_object = it->second.target;
+    return dynamic_cast<TObject *>(cached_object);
+    }
+
+  return NULL;
 }
 
 template <unsigned int VDim, typename TReal>
@@ -495,6 +590,15 @@ void GreedyApproach<VDim, TReal>
       }
     }
 
+  // Set the fixed mask (distinct from gradient mask)
+  if(param.fixed_mask.size())
+    {
+    typedef typename OFHelperType::FloatImageType MaskType;
+    typename MaskType::Pointer imgFixMask =
+        ReadImageViaCache<MaskType>(param.fixed_mask);
+    ofhelper.SetFixedMask(imgFixMask);
+    }
+
   // Generate the optimized composite images. For the NCC metric, we add random noise to
   // the composite images, specified in units of the interquartile intensity range.
   double noise = (param.metric == GreedyParameters::NCC) ? param.ncc_noise_factor : 0.0;
@@ -667,6 +771,9 @@ int GreedyApproach<VDim, TReal>
 
   // Create an optical flow helper object
   OFHelperType of_helper;
+  
+  // Object for text output
+  GreedyStdOut gout(param.verbosity);
 
   // Set the scaling factors for multi-resolution
   of_helper.SetDefaultPyramidFactors(param.iter_per_level.size());
@@ -968,8 +1075,8 @@ int GreedyApproach<VDim, TReal>
         optimizer->set_f_tolerance(1e-9);
         optimizer->set_x_tolerance(1e-4);
         optimizer->set_g_tolerance(1e-6);
-        optimizer->set_trace(true);
-        optimizer->set_verbose(true);
+        optimizer->set_trace(param.verbosity > GreedyParameters::VERB_NONE);
+        optimizer->set_verbose(param.verbosity > GreedyParameters::VERB_DEFAULT);
         optimizer->set_max_function_evals(param.iter_per_level[level]);
 
         optimizer->minimize(xLevel);
@@ -980,10 +1087,12 @@ int GreedyApproach<VDim, TReal>
         {
         // Set up the optimizer
         vnl_lbfgs *optimizer = new vnl_lbfgs(*acf);
-        optimizer->set_f_tolerance(1e-9);
-        optimizer->set_x_tolerance(1e-4);
-        optimizer->set_g_tolerance(1e-6);
-        optimizer->set_trace(true);
+        
+        // Using defaults from scipy
+        optimizer->set_f_tolerance(2.220446049250313e-9);
+        optimizer->set_g_tolerance(1e-05);
+        optimizer->set_trace(param.verbosity > GreedyParameters::VERB_NONE);
+        optimizer->set_verbose(param.verbosity > GreedyParameters::VERB_DEFAULT);
         optimizer->set_max_function_evals(param.iter_per_level[level]);
 
         optimizer->minimize(xLevel);
@@ -1005,23 +1114,23 @@ int GreedyApproach<VDim, TReal>
         }
 
       // End of level report
-      printf("END OF LEVEL %3d\n", level);
+      gout.printf("END OF LEVEL %3d\n", level);
 
       // Print final metric report
       MultiComponentMetricReport metric_report = this->GetMetricLog()[level].back();
-      printf("Level %3d  LastIter   Metrics", level);
+      gout.printf("Level %3d  LastIter   Metrics", level);
       for (unsigned i = 0; i < metric_report.ComponentMetrics.size(); i++)
-        printf("  %8.6f", metric_report.ComponentMetrics[i]);
-      printf("  Energy = %8.6f\n", metric_report.TotalMetric);
-      fflush(stdout);
+        gout.printf("  %8.6f", metric_report.ComponentMetrics[i]);
+      gout.printf("  Energy = %8.6f\n", metric_report.TotalMetric);
+      gout.flush();
       }
 
     // Print the final RAS transform for this level (even if no iter)
-    printf("Level %3d  Final RAS Transform:\n", level);
+    gout.printf("Level %3d  Final RAS Transform:\n", level);
     for(unsigned int a = 0; a < VDim+1; a++)
       {
       for(unsigned int b = 0; b < VDim+1; b++)
-        printf("%8.4f%c", Q_physical(a,b), b < VDim ? ' ' : '\n');
+        gout.printf("%8.4f%c", Q_physical(a,b), b < VDim ? ' ' : '\n');
       }
 
     delete acf;
@@ -1047,6 +1156,7 @@ public:
   void Start();
   void Stop();
   double GetMean() const;
+  double GetTotal() const;
 protected:
   double m_TotalTime;
   double m_StartTime;
@@ -1082,6 +1192,10 @@ double GreedyTimeProbe::GetMean() const
     return m_TotalTime / (CLOCKS_PER_SEC * m_Runs);
 }
 
+double GreedyTimeProbe::GetTotal() const
+{
+  return m_TotalTime / CLOCKS_PER_SEC;
+}
 
 template <unsigned int VDim, typename TReal>
 std::string
@@ -1125,6 +1239,9 @@ int GreedyApproach<VDim, TReal>
 {
   // Create an optical flow helper object
   OFHelperType of_helper;
+  
+  // Object for text output
+  GreedyStdOut gout(param.verbosity);
 
   // Set the scaling factors for multi-resolution
   of_helper.SetDefaultPyramidFactors(param.iter_per_level.size());
@@ -1164,12 +1281,17 @@ int GreedyApproach<VDim, TReal>
                                                     param.sigma_post.physical_units);
 
     // Report the smoothing factors used
-    std::cout << "LEVEL " << level+1 << " of " << nlevels << std::endl;
-    std::cout << "  Smoothing sigmas: " << sigma_pre_phys << ", " << sigma_post_phys << std::endl;
+    gout.printf("LEVEL %d of %d\n", level+1, nlevels);
+    gout.printf("  Smoothing sigmas (mm):");
+    for(unsigned int d = 0; d < VDim; d++)
+      gout.printf("%s%f", d==0 ? " " : "x", sigma_pre_phys[d]);
+    for(unsigned int d = 0; d < VDim; d++)
+      gout.printf("%s%f", d==0 ? " " : "x", sigma_post_phys[d]);
+    gout.printf("\n");
 
     // Set up timers for different critical components of the optimization
     GreedyTimeProbe tm_Gradient, tm_Gaussian1, tm_Gaussian2, tm_Iteration,
-      tm_Integration, tm_Update;
+      tm_Integration, tm_Update, tm_UpdatePDE, tm_PDE;
 
     // Intermediate images
     ImagePointer iTemp = ImageType::New();
@@ -1187,6 +1309,12 @@ int GreedyApproach<VDim, TReal>
     typedef typename LDDMMType::MatrixImageType MatrixImageType;
     typename MatrixImageType::Pointer work_mat = MatrixImageType::New();
 
+    // Sparse solver for incompressibility mode
+    void *incompressibility_solver = NULL;
+
+    // Mask used for incompressibility purposes
+    ImagePointer incompressibility_mask = NULL;
+
     // Allocate the intermediate data
     LDDMMType::alloc_vimg(uk, refspace);
     if(param.iter_per_level[level] > 0)
@@ -1200,6 +1328,20 @@ int GreedyApproach<VDim, TReal>
         {
         LDDMMType::alloc_vimg(uk_exp, refspace);
         LDDMMType::alloc_mimg(work_mat, refspace);
+        }
+
+      if(param.flag_stationary_velocity_mode && param.flag_incompressibility_mode)
+        {
+        if(param.gradient_mask.size())
+          {
+          std::cout << "Setting up incompressibility mask" << std::endl;
+          incompressibility_mask = LDDMMType::new_img(of_helper.GetGradientMask(level));
+          LDDMMType::img_copy(of_helper.GetGradientMask(level), incompressibility_mask);
+          LDDMMType::img_threshold_in_place(incompressibility_mask, 0.9, 1.0, 1.0, 0.0);
+          }
+
+        std::cout << "Setting up incompressibility solver" << std::endl;
+        incompressibility_solver = LDDMMType::poisson_pde_zero_boundary_initialize(uk, incompressibility_mask);
         }
       }
 
@@ -1227,8 +1369,6 @@ int GreedyApproach<VDim, TReal>
       LDDMMType::vimg_scale_in_place(uk, 1.0 / (1 << level));
       uLevel = uk;
       itk::Index<VDim> test; test.Fill(24);
-      std::cout << "Index 24x24x24 maps to " << uInit->GetPixel(test) << std::endl;
-      std::cout << "Index 24x24x24 maps to " << uk->GetPixel(test) << std::endl;
       }
     else if(param.affine_init_mode != VOX_IDENTITY)
       {
@@ -1256,12 +1396,7 @@ int GreedyApproach<VDim, TReal>
       uLevel = uk;
 
       itk::Index<VDim> test; test.Fill(24);
-      std::cout << "Index 24x24x24 maps to " << uk->GetPixel(test) << std::endl;
       }
-
-    if (uLevel.IsNotNull())
-      //LDDMMType::vimg_write(uLevel, "/tmp/ulevel.nii.gz");
-      std::cout << "uLevel present but not writing image.\n";
 
     // Iterate for this level
     for(unsigned int iter = 0; iter < param.iter_per_level[level]; iter++)
@@ -1412,11 +1547,55 @@ int GreedyApproach<VDim, TReal>
         LDDMMType::vimg_write(uk1, fname);
         }
 
-      // Another layer of smoothing
+      // Another layer of smoothing (diffusion-like)
       tm_Gaussian2.Start();
       LDDMMType::vimg_smooth_withborder(uk1, uk, sigma_post_phys, 1);
       tm_Gaussian2.Stop();
 
+      // Optional incompressibility step
+      tm_UpdatePDE.Start();
+      if(incompressibility_solver)
+        {
+        // Compute the divergence of uk.
+        LDDMMType::field_divergence(uk, iTemp, true);
+
+        // If using mask, multiply
+        if(incompressibility_mask)
+          LDDMMType::img_multiply_in_place(iTemp, incompressibility_mask);
+
+        // Dump the divergence before correction
+        if(param.flag_dump_moving && 0 == iter % param.dump_frequency)
+          {
+          char fname[256];
+          sprintf(fname, "dump_divv_pre_lev%02d_iter%04d.nii.gz", level, iter);
+          LDDMMType::img_write(iTemp, fname);
+          }
+
+        // TODO: this should not be temporary!
+        typename LDDMMType::ImagePointer pde_soln = LDDMMType::new_img(iTemp);
+
+        // Solve the PDE
+        tm_PDE.Start();
+        LDDMMType::poisson_pde_zero_boundary_solve(incompressibility_solver, iTemp, pde_soln);
+        tm_PDE.Stop();
+        if(incompressibility_mask)
+          LDDMMType::img_multiply_in_place(pde_soln, incompressibility_mask);
+
+        // Take the gradient of the solution and subtract from uk
+        LDDMMType::image_gradient(pde_soln, uk1, true);
+        LDDMMType::vimg_subtract_in_place(uk, uk1);
+
+        // Compute the divergence of the updated image. Should be zero
+        // Dump the divergence after correction
+        if(param.flag_dump_moving && 0 == iter % param.dump_frequency)
+          {
+          char fname[256];
+          sprintf(fname, "dump_divv_post_lev%02d_iter%04d.nii.gz", level, iter);
+          LDDMMType::field_divergence(uk, iTemp, true);
+          LDDMMType::img_write(iTemp, fname);
+          }
+        }
+      tm_UpdatePDE.Stop();
       tm_Iteration.Stop();
       }
 
@@ -1429,27 +1608,41 @@ int GreedyApproach<VDim, TReal>
       LDDMMType::field_jacobian_det(uk, iTemp);
       TReal jac_min, jac_max;
       LDDMMType::img_min_max(iTemp, jac_min, jac_max);
-      printf("END OF LEVEL %3d    DetJac Range: %8.4f  to %8.4f \n", level, jac_min, jac_max);
+      gout.printf("END OF LEVEL %3d    DetJac Range: %8.4f  to %8.4f \n", level, jac_min, jac_max);
 
       // Print final metric report
       MultiComponentMetricReport metric_report = this->GetMetricLog()[level].back();
-      std::cout << this->PrintIter(level, -1, metric_report) << std::endl;
-      fflush(stdout);
-
+      std::string iter_line = this->PrintIter(level, -1, metric_report);
+      gout.printf("%s\n", iter_line.c_str());
+      gout.flush();
+      
       // Print timing information
-      printf("  Avg. Gradient Time  : %6.4fs  %5.2f%% \n", tm_Gradient.GetMean(), 
-             tm_Gradient.GetMean() * 100.0 / tm_Iteration.GetMean());
-      printf("  Avg. Gaussian Time  : %6.4fs  %5.2f%% \n", tm_Gaussian1.GetMean() + tm_Gaussian2.GetMean(),
-             (tm_Gaussian1.GetMean() + tm_Gaussian2.GetMean()) * 100.0 / tm_Iteration.GetMean());
-      printf("  Avg. Integration Time  : %6.4fs  %5.2f%% \n", tm_Integration.GetMean() + tm_Update.GetMean(),
-             (tm_Integration.GetMean() + tm_Update.GetMean()) * 100.0 / tm_Iteration.GetMean());
-      printf("  Avg. Total Iteration Time : %6.4fs \n", tm_Iteration.GetMean());
+      double n_it = param.iter_per_level[level];
+      double t_total = tm_Iteration.GetTotal() / n_it;
+      double t_gradient = tm_Gradient.GetTotal() / n_it;
+      double t_gaussian = (tm_Gaussian1.GetTotal() + tm_Gaussian2.GetTotal()) / n_it;
+      double t_update = (tm_Integration.GetTotal() + tm_Update.GetTotal() + tm_UpdatePDE.GetTotal()) / n_it;
+      double t_pde = tm_PDE.GetTotal() / n_it;
+      gout.printf("  Avg. Gradient Time        : %6.4fs  %5.2f%% \n", t_gradient, 100 * t_gradient / t_total);
+      gout.printf("  Avg. Gaussian Time        : %6.4fs  %5.2f%% \n", t_gaussian, 100 * t_gaussian / t_total);
+      if(incompressibility_solver)
+        {
+        gout.printf("  Avg. PDE Time             : %6.4fs  %5.2f%% \n", t_pde, 100 * t_pde / t_total);
+        }
+      gout.printf("  Avg. Integration Time     : %6.4fs  %5.2f%% \n", t_update, 100 * t_update / t_total);
+      gout.printf("  Avg. Total Iteration Time : %6.4fs \n", t_total);
       }
+
+      // Deallocate the incompressibility solver
+      if(incompressibility_solver)
+        LDDMMType::poisson_pde_zero_boundary_dealloc(incompressibility_solver);
+
     }
 
   // The transformation field is in voxel units. To work with ANTS, it must be mapped
   // into physical offset units - just scaled by the spacing?
-  
+  ImageBaseType *warp_ref_space = of_helper.GetMovingReferenceSpace(nlevels - 1);
+
   if(param.flag_stationary_velocity_mode)
     {
     // Take current warp to 'exponent' power - this is the actual warp
@@ -1457,25 +1650,29 @@ int GreedyApproach<VDim, TReal>
     VectorImagePointer uLevelWork = LDDMMType::new_vimg(uLevel);
     LDDMMType::vimg_exp(uLevel, uLevelExp, uLevelWork, param.warp_exponent, 1.0);
 
-    // Write the resulting transformation field
-    of_helper.WriteCompressedWarpInPhysicalSpace(nlevels - 1, uLevelExp, param.output.c_str(), param.warp_precision);
+    // Write the resulting transformation field (if provided)
+    if(param.output.size())
+      {
+      WriteCompressedWarpInPhysicalSpaceViaCache(warp_ref_space, uLevelExp, param.output.c_str(), param.warp_precision);
+      }
 
+    // If asked to write root warp, do so
     if(param.root_warp.size())
       {
-      // If asked to write root warp, do so
-      of_helper.WriteCompressedWarpInPhysicalSpace(nlevels - 1, uLevel, param.root_warp.c_str(), 0);
+      WriteCompressedWarpInPhysicalSpaceViaCache(warp_ref_space, uLevel, param.root_warp.c_str(), 0);
       }
+
+    // Compute the inverse (this is probably unnecessary for small warps)
     if(param.inverse_warp.size())
       {
-      // Compute the inverse (this is probably unnecessary for small warps)
       of_helper.ComputeDeformationFieldInverse(uLevel, uLevelWork, 0);
-      of_helper.WriteCompressedWarpInPhysicalSpace(nlevels - 1, uLevelWork, param.inverse_warp.c_str(), param.warp_precision);
+      WriteCompressedWarpInPhysicalSpaceViaCache(warp_ref_space, uLevelWork, param.inverse_warp.c_str(), param.warp_precision);
       }
     }
   else
     {
     // Write the resulting transformation field
-    of_helper.WriteCompressedWarpInPhysicalSpace(nlevels - 1, uLevel, param.output.c_str(), param.warp_precision);
+    WriteCompressedWarpInPhysicalSpaceViaCache(warp_ref_space, uLevel, param.output.c_str(), param.warp_precision);
 
     // If an inverse is requested, compute the inverse using the Chen 2008 fixed method.
     // A modification of this method is that if convergence is slow, we take the square
@@ -1494,11 +1691,36 @@ int GreedyApproach<VDim, TReal>
       of_helper.ComputeDeformationFieldInverse(uLevel, uInverse, param.warp_exponent);
 
       // Write the warp using compressed format
-      of_helper.WriteCompressedWarpInPhysicalSpace(nlevels - 1, uInverse, param.inverse_warp.c_str(), param.warp_precision);
+      WriteCompressedWarpInPhysicalSpaceViaCache(warp_ref_space, uInverse, param.inverse_warp.c_str(), param.warp_precision);
       }
     }
   return 0;
 }
+
+
+
+
+template <unsigned int VDim, typename TReal>
+void GreedyApproach<VDim, TReal>
+::WriteCompressedWarpInPhysicalSpaceViaCache(
+  ImageBaseType *moving_ref_space, VectorImageType *warp, const char *filename, double precision)
+{
+  // Define a _float_ output type, even if working with double precision (less space on disk)
+  typedef CompressWarpFunctor<VectorImageType, VectorImageType> Functor;
+
+  typedef UnaryPositionBasedFunctorImageFilter<VectorImageType, VectorImageType, Functor> Filter;
+  Functor functor(warp, moving_ref_space, precision);
+
+  // Perform the compression
+  typename Filter::Pointer filter = Filter::New();
+  filter->SetFunctor(functor);
+  filter->SetInput(warp);
+  filter->Update();
+
+  // Write the resulting image via cache
+  WriteImageViaCache(filter->GetOutput(), filename, itk::ImageIOBase::FLOAT);
+}
+
 
 
 
@@ -1753,14 +1975,13 @@ void GreedyApproach<VDim, TReal>
     std::string tran = tran_chain[i].filename;
 
     // Determine if it's an affine transform
-    if(itk::ImageIOFactory::CreateImageIO(tran.c_str(), itk::ImageIOFactory::ReadMode))
+    if(CheckCache<VectorImageType>(tran) || itk::ImageIOFactory::CreateImageIO(tran.c_str(), itk::ImageIOFactory::ReadMode))
       {
       // Create a temporary warp
       VectorImagePointer warp_tmp = LDDMMType::new_vimg(ref_space);
 
       // Read the next warp
-      VectorImagePointer warp_i = VectorImageType::New();
-      LDDMMType::vimg_read(tran.c_str(), warp_i);
+      VectorImagePointer warp_i = ReadImageViaCache<VectorImageType>(tran);
 
       // If there is an exponent on the transform spec, handle it
       if(tran_chain[i].exponent != 1)
@@ -2074,6 +2295,14 @@ int GreedyApproach<VDim, TReal>
   return 0;
 }
 
+
+template <typename TReal, typename TLabel>
+class CompositeToLabelFunctor
+{
+  public:
+    short operator () (itk::VariableLengthVector<TReal> const &p) const { return (short) p[0]; }
+};
+
 /**
  * Run the reslice code - simply apply a warp or set of warps to images
  */
@@ -2081,6 +2310,9 @@ template <unsigned int VDim, typename TReal>
 int GreedyApproach<VDim, TReal>
 ::RunReslice(GreedyParameters &param)
 {
+  // Object for text output
+  GreedyStdOut gout(param.verbosity);
+
   GreedyResliceParameters r_param = param.reslice_param;
 
   // Check the parameters
@@ -2125,20 +2357,24 @@ int GreedyApproach<VDim, TReal>
     // Handle the special case of multi-label images
     if(r_param.images[i].interp.mode == InterpSpec::LABELWISE)
       {
-      // The label image assumed to be an image of shortsC
-      typedef itk::Image<short, VDim> LabelImageType;
-      typedef itk::ImageFileReader<LabelImageType> LabelReaderType;
+      // The label image is assumed to have a finite set of labels
+      typename CompositeImageType::Pointer moving = ReadImageViaCache<CompositeImageType>(filename);
+      if(moving->GetNumberOfComponentsPerPixel() > 1)
+        throw GreedyException("Label wise interpolation not supported for multi-component images");
 
-      // Create a reader
-      typename LabelReaderType::Pointer reader = LabelReaderType::New();
-      reader->SetFileName(filename);
-      reader->Update();
-      typename LabelImageType::Pointer moving = reader->GetOutput();
+      // Cast the image to an image of shorts
+      typedef itk::Image<short, VDim> LabelImageType;
+      typedef CompositeToLabelFunctor<TReal, short> CastFunctor;
+      typedef itk::UnaryFunctorImageFilter<CompositeImageType, LabelImageType, CastFunctor> CastFilter;
+      typename CastFilter::Pointer fltCast = CastFilter::New();
+      fltCast->SetInput(moving);
+      fltCast->Update();
+      typename LabelImageType::Pointer label_image = fltCast->GetOutput();
 
       // Scan the unique labels in the image
       std::set<short> label_set;
-      short *labels = moving->GetBufferPointer();
-      int n_pixels = moving->GetPixelContainer()->Size();
+      short *labels = label_image->GetBufferPointer();
+      int n_pixels = label_image->GetPixelContainer()->Size();
 
       // Get the list of unique pixels
       short last_pixel = 0;
@@ -2172,7 +2408,7 @@ int GreedyApproach<VDim, TReal>
         // Set up a threshold filter for this label
         typedef itk::BinaryThresholdImageFilter<LabelImageType, ImageType> ThresholdFilterType;
         typename ThresholdFilterType::Pointer fltThreshold = ThresholdFilterType::New();
-        fltThreshold->SetInput(moving);
+        fltThreshold->SetInput(label_image);
         fltThreshold->SetLowerThreshold(label_array[j]);
         fltThreshold->SetUpperThreshold(label_array[j]);
         fltThreshold->SetInsideValue(1.0);
@@ -2192,7 +2428,7 @@ int GreedyApproach<VDim, TReal>
           {
           typename SmootherType::SigmaArrayType sigma_array;
           for(int d = 0; d < VDim; d++)
-            sigma_array[d] = r_param.images[i].interp.sigma.sigma * moving->GetSpacing()[d];
+            sigma_array[d] = r_param.images[i].interp.sigma.sigma * label_image->GetSpacing()[d];
           fltSmooth->SetSigmaArray(sigma_array);
           }
 
@@ -2480,7 +2716,7 @@ int GreedyApproach<VDim, TReal>
   OFHelperType::ComputeDeformationFieldInverse(warp, uInverse, param.warp_exponent, true);
 
   // Write the warp using compressed format
-  OFHelperType::WriteCompressedWarpInPhysicalSpace(uInverse, warp, param.invwarp_param.out_warp.c_str(), param.warp_precision);
+  WriteCompressedWarpInPhysicalSpaceViaCache(uInverse, warp, param.invwarp_param.out_warp.c_str(), param.warp_precision);
 
   return 0;
 }
@@ -2509,10 +2745,26 @@ int GreedyApproach<VDim, TReal>
   OFHelperType::ComputeWarpRoot(warp, warp_root, param.warp_exponent, 1e-6);
 
   // Write the warp using compressed format
-  OFHelperType::WriteCompressedWarpInPhysicalSpace(warp_root, warp, param.warproot_param.out_warp.c_str(), param.warp_precision);
+  WriteCompressedWarpInPhysicalSpaceViaCache(warp_root, warp, param.warproot_param.out_warp.c_str(), param.warp_precision);
 
   return 0;
 }
+
+template <unsigned int VDim, typename TReal>
+int GreedyApproach<VDim, TReal>
+::RunMetric(GreedyParameters &param)
+{
+  MultiComponentMetricReport metric_report;
+  this->ComputeMetric(param, metric_report);
+  
+  printf("Metric Report:\n");
+  for (unsigned i = 0; i < metric_report.ComponentMetrics.size(); i++)
+    printf("  Component %d: %8.6f", i, metric_report.ComponentMetrics[i]);
+  printf("  Total = %8.6f\n", metric_report.TotalMetric);
+	
+  return 0;
+}
+
 
 
 template <unsigned int VDim, typename TReal>
@@ -2559,15 +2811,17 @@ template <unsigned int VDim, typename TReal>
 void GreedyApproach<VDim, TReal>
 ::ConfigThreads(const GreedyParameters &param)
 {
+  GreedyStdOut gout(param.verbosity);
+  
   if(param.threads > 0)
     {
-    std::cout << "Limiting the number of threads to " << param.threads << std::endl;
+    gout.printf("Limiting the number of threads to %d\n", param.threads);
     itk::MultiThreader::SetGlobalMaximumNumberOfThreads(param.threads);
     }
   else
     {
-    std::cout << "Executing with the default number of threads: " << itk::MultiThreader::GetGlobalDefaultNumberOfThreads() << std::endl;
-
+    gout.printf("Executing with the default number of threads: %d\n",
+                itk::MultiThreader::GetGlobalDefaultNumberOfThreads());
     }
 }
 
@@ -2595,6 +2849,8 @@ int GreedyApproach<VDim, TReal>
       return Self::RunJacobian(param);
     case GreedyParameters::ROOT_WARP:
       return Self::RunRootWarp(param);
+    case GreedyParameters::METRIC:
+      return Self::RunMetric(param);
     }
 
   return -1;

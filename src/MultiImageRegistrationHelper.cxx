@@ -42,6 +42,7 @@
 #include "itkUnaryFunctorImageFilter.h"
 #include "itkImageFileWriter.h"
 #include "GreedyException.h"
+#include "WarpFunctors.h"
 
 template <class TFloat, unsigned int VDim>
 void
@@ -170,7 +171,6 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
     }
 }
 
-
 template <class TFloat, unsigned int VDim>
 void
 MultiImageOpticalFlowHelper<TFloat, VDim>
@@ -184,6 +184,10 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   // Set up the composite images
   m_FixedComposite.resize(m_PyramidFactors.size());
   m_MovingComposite.resize(m_PyramidFactors.size());
+
+  // The fixed mask is binarized
+  if(m_FixedMaskImage)
+    LDDMMType::img_threshold_in_place(m_FixedMaskImage, 0.5, 1e100, 0.0, 1.0);
 
   // Repeat for each of the input images
   for(int j = 0; j < m_Fixed.size(); j++)
@@ -208,6 +212,16 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
       // Deal with additive noise
       double noise_sigma_fixed = 0.0, noise_sigma_moving = 0.0;
 
+      // Do the fixed and moving images have NaNs?
+      bool nans_fixed, nans_moving;
+
+      // If the fixed mask is present, we use it to set nans in the fixed image
+      if(m_FixedMaskImage)
+        {
+        LDDMMType::img_reconstitute_nans_in_place(fltExtractFixed->GetOutput(), m_FixedMaskImage);
+        LDDMMType::img_write(fltExtractFixed->GetOutput(), "/tmp/testnan.mha");
+        }
+
       if(noise_sigma_relative > 0.0)
         {
         // Figure out the quartiles of the fixed image
@@ -231,6 +245,35 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
 
         // Report noise levels
         printf("Noise on image %d component %d: fixed = %g, moving = %g\n", j, k, noise_sigma_fixed, noise_sigma_moving);
+
+        // Record the number of NaNs
+        nans_fixed = fltQuantileFixed->GetNumberOfNaNs(0);
+        nans_moving = fltQuantileMoving->GetNumberOfNaNs(0);
+        }
+      else
+        {
+        nans_fixed = isnan(LDDMMType::img_voxel_sum(fltExtractFixed->GetOutput()));
+        nans_moving = isnan(LDDMMType::img_voxel_sum(fltExtractMoving->GetOutput()));
+        }
+
+      // Report number of NaNs in fixed and moving images
+      if(j==0 && k==0)
+        {
+        printf("Number of NaNs: fixed: %d, moving %d\n", nans_fixed, nans_moving);
+        }
+      
+      // Split the extracted images into a NaN mask and a non-NaN component
+      FloatImagePointer nanMaskFixed, nanMaskMoving;
+      if(nans_fixed)
+        {
+        nanMaskFixed = LDDMMType::new_img(fltExtractFixed->GetOutput());
+        LDDMMType::img_filter_nans_in_place(fltExtractFixed->GetOutput(), nanMaskFixed);
+        }
+      
+      if(nans_moving)
+        {
+        nanMaskMoving = LDDMMType::new_img(fltExtractMoving->GetOutput());
+        LDDMMType::img_filter_nans_in_place(fltExtractMoving->GetOutput(), nanMaskMoving);
         }
 
       // Compute the pyramid for this component
@@ -241,16 +284,39 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
         if (m_PyramidFactors[i] == 1)
           {
           lFixed = fltExtractFixed->GetOutput();
+          if(nans_fixed)
+            LDDMMType::img_reconstitute_nans_in_place(lFixed, nanMaskFixed);
+
           lMoving = fltExtractMoving->GetOutput();
+          if(nans_moving)
+            LDDMMType::img_reconstitute_nans_in_place(lMoving, nanMaskMoving);
           }
         else
           {
+          // Downsample the images
           lFixed = FloatImageType::New();
           lMoving = FloatImageType::New();
           LDDMMType::img_downsample(fltExtractFixed->GetOutput(), lFixed, m_PyramidFactors[i]);
           LDDMMType::img_downsample(fltExtractMoving->GetOutput(), lMoving, m_PyramidFactors[i]);
 
-          // For the Mahalanobis metric, the fixed image needs to be scaled by the factor of the 
+          // Downsample the nan-masks
+          if(nans_fixed)
+            {
+            FloatImagePointer mask_ds = FloatImageType::New();
+            LDDMMType::img_downsample(nanMaskFixed, mask_ds, m_PyramidFactors[i]);
+            LDDMMType::img_threshold_in_place(mask_ds, 0.5, 100.0, 1, 0);
+            LDDMMType::img_reconstitute_nans_in_place(lFixed, mask_ds);
+            }
+
+          if(nans_moving)
+            {
+            FloatImagePointer mask_ds = FloatImageType::New();
+            LDDMMType::img_downsample(nanMaskMoving, mask_ds, m_PyramidFactors[i]);
+            LDDMMType::img_threshold_in_place(mask_ds, 0.5, 100.0, 1, 0);
+            LDDMMType::img_reconstitute_nans_in_place(lMoving, mask_ds);
+            }
+
+          // For the Mahalanobis metric, the fixed image needs to be scaled by the factor of the
           // pyramid level because it describes voxel coordinates
           if(m_ScaleFixedImageWithVoxelSize)
             LDDMMType::img_scale_in_place(lFixed, 1.0 / m_PyramidFactors[i]);
@@ -367,8 +433,9 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
         // Downsampling the mask involves smoothing, so the mask will no longer be binary
         LDDMMType::img_downsample(m_MovingMaskImage, m_MovingMaskComposite[i], m_PyramidFactors[i]);
 
-        // We don't need the moving mask to be binary, we can leave it be floating point...
-        // LDDMMType::img_threshold_in_place(m_MovingMaskComposite[i], 0.5, 1e100, 1.0, 0.0);
+        // We might not need the moving mask to be binary, we can leave it be floating point
+        // but for now we binarize it
+        LDDMMType::img_threshold_in_place(m_MovingMaskComposite[i], 0.5, 1e100, 1.0, 0.0);
         }
       }
     }
@@ -455,6 +522,11 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   for (unsigned i = 0; i < wscaled.size(); i++)
     wscaled[i] = m_Weights[i] * result_scaling;
 
+  // TODO: this needs to be controlled by parameters, etc.
+  // 'false' represents compatibility with previous greedy versions
+  filter->SetUseDemonsGradientForm(false);
+  filter->SetDemonsSigma(0.01);
+
   // Run the filter
   filter->SetFixedImage(m_FixedComposite[level]);
   filter->SetMovingImage(m_MovingComposite[level]);
@@ -468,6 +540,36 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   // Process the results
   out_metric_report.ComponentMetrics = filter->GetAllMetricValues();
   out_metric_report.TotalMetric = filter->GetMetricValue();
+}
+
+template <class TFloat, unsigned int VDim>
+void
+MultiImageOpticalFlowHelper<TFloat, VDim>
+::ComputeHistogramsIfNeeded(int level)
+{
+  typedef MutualInformationPreprocessingFilter<MultiComponentImageType, BinnedImageType> BinnerType;
+  if(m_FixedBinnedImage.IsNull()
+     || m_FixedBinnedImage->GetBufferedRegion() != m_FixedComposite[level]->GetBufferedRegion())
+    {
+    typename BinnerType::Pointer fixed_binner = BinnerType::New();
+    fixed_binner->SetInput(m_FixedComposite[level]);
+    fixed_binner->SetBins(128);
+    fixed_binner->SetLowerQuantile(0.01);
+    fixed_binner->SetUpperQuantile(0.99);
+    fixed_binner->SetStartAtBinOne(true);
+    fixed_binner->Update();
+    m_FixedBinnedImage = fixed_binner->GetOutput();
+
+    typename BinnerType::Pointer moving_binner = BinnerType::New();
+    moving_binner = BinnerType::New();
+    moving_binner->SetInput(m_MovingComposite[level]);
+    moving_binner->SetBins(128);
+    moving_binner->SetLowerQuantile(0.01);
+    moving_binner->SetUpperQuantile(0.99);
+    moving_binner->SetStartAtBinOne(true);
+    moving_binner->Update();
+    m_MovingBinnedImage = moving_binner->GetOutput();
+    }
 }
 
 template <class TFloat, unsigned int VDim>
@@ -493,37 +595,14 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   typedef itk::VectorImage<unsigned char, VDim> BinnedImageType;
   typedef MutualInformationPreprocessingFilter<MultiComponentImageType, BinnedImageType> BinnerType;
 
-  // TODO: this is utter laziness, get rid of this garbage!
-  static typename BinnerType::Pointer binner_fixed;
-  static typename BinnerType::Pointer binner_moving;
-
-  if(binner_fixed.IsNull()
-     || binner_fixed->GetOutput()->GetBufferedRegion()
-     != m_FixedComposite[level]->GetBufferedRegion())
-    {
-    binner_fixed = BinnerType::New();
-    binner_fixed->SetInput(m_FixedComposite[level]);
-    binner_fixed->SetBins(128);
-    binner_fixed->SetLowerQuantile(0.01);
-    binner_fixed->SetUpperQuantile(0.99);
-    binner_fixed->SetStartAtBinOne(true);
-    binner_fixed->Update();
-
-    binner_moving = BinnerType::New();
-    binner_moving->SetInput(m_MovingComposite[level]);
-    binner_moving->SetBins(128);
-    binner_moving->SetLowerQuantile(0.01);
-    binner_moving->SetUpperQuantile(0.99);
-    binner_moving->SetStartAtBinOne(true);
-    binner_moving->Update();
-    }
-
+  // Initialize the histograms
+  this->ComputeHistogramsIfNeeded(level);
 
   typename MetricType::Pointer metric = MetricType::New();
 
   metric->SetComputeNormalizedMutualInformation(normalized_mutual_information);
-  metric->SetFixedImage(binner_fixed->GetOutput());
-  metric->SetMovingImage(binner_moving->GetOutput());
+  metric->SetFixedImage(m_FixedBinnedImage);
+  metric->SetMovingImage(m_MovingBinnedImage);
   metric->SetDeformationField(def);
   metric->SetWeights(wscaled);
   metric->SetComputeGradient(true);
@@ -610,6 +689,8 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   filter->SetWorkingImage(m_NCCWorkingImage);
   filter->SetReuseWorkingImageFixedComponents(!first_run);
   filter->SetFixedMaskImage(m_GradientMaskComposite[level]);
+  filter->SetMovingMaskImage(m_MovingMaskComposite[level]);
+
 
   // TODO: support moving masks...
   // filter->SetMovingMaskImage(m_MovingMaskComposite[level]);
@@ -638,6 +719,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   filter->GetMetricOutput()->Graft(out_metric_image);
   filter->GetDeformationGradientOutput()->Graft(out_gradient);
   filter->SetFixedMaskImage(m_GradientMaskComposite[level]);
+  filter->SetMovingMaskImage(m_MovingMaskComposite[level]);
 
   filter->Update();
 
@@ -677,6 +759,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   metric->GetMetricOutput()->Graft(wrkMetric);
   metric->SetComputeGradient(grad != NULL);
   metric->SetFixedMaskImage(m_GradientMaskComposite[level]);
+  metric->SetMovingMaskImage(m_MovingMaskComposite[level]);
   metric->SetJitterImage(m_JitterComposite[level]);
   metric->Update();
 
@@ -730,42 +813,21 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   typedef itk::VectorImage<unsigned char, VDim> BinnedImageType;
   typedef MutualInformationPreprocessingFilter<MultiComponentImageType, BinnedImageType> BinnerType;
 
-  // TODO: this is utter laziness, get rid of this garbage!
-  static typename BinnerType::Pointer binner_fixed;
-  static typename BinnerType::Pointer binner_moving;
-
-  if(binner_fixed.IsNull()
-     || binner_fixed->GetOutput()->GetBufferedRegion()
-     != m_FixedComposite[level]->GetBufferedRegion())
-    {
-    binner_fixed = BinnerType::New();
-    binner_fixed->SetInput(m_FixedComposite[level]);
-    binner_fixed->SetBins(128);
-    binner_fixed->SetLowerQuantile(0.01);
-    binner_fixed->SetUpperQuantile(0.99);
-    binner_fixed->SetStartAtBinOne(true);
-    binner_fixed->Update();
-
-    binner_moving = BinnerType::New();
-    binner_moving->SetInput(m_MovingComposite[level]);
-    binner_moving->SetBins(128);
-    binner_moving->SetLowerQuantile(0.01);
-    binner_moving->SetUpperQuantile(0.99);
-    binner_moving->SetStartAtBinOne(true);
-    binner_moving->Update();
-    }
+  // Initialize the histograms
+  this->ComputeHistogramsIfNeeded(level);
 
   typename MetricType::Pointer metric = MetricType::New();
 
   metric->SetComputeNormalizedMutualInformation(normalized_mutual_info);
-  metric->SetFixedImage(binner_fixed->GetOutput());
-  metric->SetMovingImage(binner_moving->GetOutput());
+  metric->SetFixedImage(m_FixedBinnedImage);
+  metric->SetMovingImage(m_MovingBinnedImage);
   metric->SetWeights(wscaled);
   metric->SetAffineTransform(tran);
   metric->SetComputeMovingDomainMask(true);
   metric->GetMetricOutput()->Graft(wrkMetric);
   metric->SetComputeGradient(grad != NULL);
   metric->SetFixedMaskImage(m_GradientMaskComposite[level]);
+  metric->SetMovingMaskImage(m_MovingMaskComposite[level]);
   metric->SetBins(128);
   metric->SetJitterImage(m_JitterComposite[level]);
   metric->Update();
@@ -830,6 +892,7 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
   metric->SetWorkingImage(m_NCCWorkingImage);
   metric->SetReuseWorkingImageFixedComponents(!first_run);
   metric->SetFixedMaskImage(m_GradientMaskComposite[level]);
+  metric->SetMovingMaskImage(m_MovingMaskComposite[level]);
   metric->SetJitterImage(m_JitterComposite[level]);
   metric->Update();
 
@@ -842,6 +905,95 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
 
   out_metric.TotalMetric = metric->GetMetricValue();
   out_metric.ComponentMetrics = metric->GetAllMetricValues();
+
+  // TODO: delete this sht
+  /*
+  if(grad)
+    {
+
+
+    // Generate a phi from the affine transform
+    typedef LDDMMData<TFloat, VDim> LDDMMType;
+    VectorImagePointer phi = LDDMMType::new_vimg(m_FixedComposite[level]);
+    for(itk::ImageRegionIteratorWithIndex<VectorImageType>
+        it(phi, phi->GetBufferedRegion()); !it.IsAtEnd(); ++it)
+      {
+      typename VectorImageType::PixelType v;
+      for(int d = 0; d < VDim; d++)
+        {
+        v[d] = tran->GetOffset()[d] - it.GetIndex()[d];
+        for(int j = 0; j < VDim; j++)
+          v[d] += tran->GetMatrix()(d,j) * it.GetIndex()[j];
+        }
+      it.Set(v);
+      }
+
+    // LDDMMType::vimg_write(phi, "/tmp/wtf.nii.gz");
+
+    MultiComponentMetricReport dummy;
+    FloatImagePointer tmp_met = LDDMMType::new_img(m_FixedComposite[level]);
+    VectorImagePointer grad_phi = LDDMMType::new_vimg(m_FixedComposite[level]);
+    tmp_met->FillBuffer(0.0);
+
+
+    typename MetricType::Pointer filter2 = MetricType::New();
+
+    // Run the filter
+    MultiComponentImagePointer work2 = MultiComponentImageType::New();
+
+    filter2->SetFixedImage(m_FixedComposite[level]);
+    filter2->SetMovingImage(m_MovingComposite[level]);
+    filter2->SetDeformationField(phi);
+    filter2->SetWeights(wscaled);
+    filter2->SetComputeGradient(true);
+    filter2->GetMetricOutput()->Graft(tmp_met);
+    filter2->GetDeformationGradientOutput()->Graft(grad_phi);
+    filter2->SetRadius(radius_fix);
+    filter2->SetWorkingImage(work2);
+    filter2->SetReuseWorkingImageFixedComponents(false);
+    filter2->SetFixedMaskImage(m_GradientMaskComposite[level]);
+
+    // TODO: support moving masks...
+    // filter->SetMovingMaskImage(m_MovingMaskComposite[level]);
+    filter2->Update();
+    dummy.TotalMetric = filter2->GetMetricValue();
+
+    typename LinearTransformType::Pointer tran2 = LinearTransformType::New();
+    typename LinearTransformType::MatrixType A2; A2.Fill(0.0);
+    typename LinearTransformType::OffsetType b2; b2.Fill(0.0);
+
+    double mtx = 0.0, msk = 0.0;
+    for(itk::ImageRegionIteratorWithIndex<VectorImageType>
+        it(grad_phi, grad_phi->GetBufferedRegion()); !it.IsAtEnd(); ++it)
+      {
+      if(!m_GradientMaskComposite[level] || m_GradientMaskComposite[level]->GetPixel(it.GetIndex()) > 0.5)
+        {
+        mtx += tmp_met->GetPixel(it.GetIndex());
+
+        msk += 1.0;
+        for(int d = 0; d < VDim; d++)
+          {
+          b2[d] += it.Value()[d];
+          for(int j = 0; j < VDim; j++)
+            A2(d,j) += it.Value()[d] * it.GetIndex()[j];
+          }
+        }
+      }
+
+    for(int d = 0; d < VDim; d++)
+      {
+      b2[d] /= msk;
+      for(int j = 0; j < VDim; j++)
+        A2(d,j) /= msk;
+      }
+
+    //grad->SetMatrix(A2);
+    //grad->SetOffset(b2);
+    //out_metric.TotalMetric = mtx / msk;
+    //out_metric.ComponentMetrics = filter2->GetAllMetricValues();
+
+    }
+    */
 }
 
 template <class TFloat, unsigned int VDim>
@@ -876,200 +1028,6 @@ MultiImageOpticalFlowHelper<TFloat, VDim>
     }
 }
 
-
-template <class TInputImage, class TOutputImage, class TFunctor>
-class UnaryPositionBasedFunctorImageFilter : public itk::ImageToImageFilter<TInputImage, TOutputImage>
-{
-public:
-
-  typedef UnaryPositionBasedFunctorImageFilter<TInputImage,TOutputImage,TFunctor> Self;
-  typedef itk::ImageToImageFilter<TInputImage, TOutputImage> Superclass;
-  typedef itk::SmartPointer<Self>                           Pointer;
-  typedef itk::SmartPointer<const Self>                     ConstPointer;
-  typedef typename Superclass::OutputImageRegionType         OutputImageRegionType;
-
-  /** Method for creation through the object factory. */
-  itkNewMacro(Self)
-
-  /** Run-time type information (and related methods) */
-  itkTypeMacro( UnaryPositionBasedFunctorImageFilter, itk::ImageToImageFilter )
-
-  /** Determine the image dimension. */
-  itkStaticConstMacro(ImageDimension, unsigned int, TOutputImage::ImageDimension );
-
-  void SetFunctor(const TFunctor &f) { this->m_Functor = f; }
-
-protected:
-  UnaryPositionBasedFunctorImageFilter() {}
-  ~UnaryPositionBasedFunctorImageFilter() {}
-
-  virtual void ThreadedGenerateData(const OutputImageRegionType& outputRegionForThread,
-                                    itk::ThreadIdType threadId) ITK_OVERRIDE 
-  {
-    typedef itk::ImageRegionConstIteratorWithIndex<TInputImage> InputIter;
-    InputIter it_in(this->GetInput(), outputRegionForThread);
-
-    typedef itk::ImageRegionIterator<TOutputImage> OutputIter;
-    OutputIter it_out(this->GetOutput(), outputRegionForThread);
-
-    for(; !it_out.IsAtEnd(); ++it_out, ++it_in)
-      {
-      it_out.Set(m_Functor(it_in.Get(), it_in.GetIndex()));
-      }
-  }
-
-  TFunctor m_Functor;
-};
-
-template <class TWarpImage>
-class VoxelToPhysicalWarpFunctor
-{
-public:
-  typedef itk::ImageBase<TWarpImage::ImageDimension> ImageBaseType;
-  typedef typename TWarpImage::PixelType VectorType;
-  typedef itk::Index<TWarpImage::ImageDimension> IndexType;
-
-  VectorType operator()(const VectorType &v, const IndexType &pos)
-  {
-    // Get the physical point for the tail of the arrow
-    typedef itk::ContinuousIndex<double, TWarpImage::ImageDimension> CIType;
-    typedef typename TWarpImage::PointType PtType;
-
-    CIType ia, ib;
-    PtType pa, pb;
-    for(int i = 0; i < TWarpImage::ImageDimension; i++)
-      {
-      ia[i] = pos[i];
-      ib[i] = pos[i] + v[i];
-      }
-
-    m_Warp->TransformContinuousIndexToPhysicalPoint(ia, pa);
-    m_MovingSpace->TransformContinuousIndexToPhysicalPoint(ib, pb);
-
-    VectorType y;
-    for(int i = 0; i < TWarpImage::ImageDimension; i++)
-      y[i] = pb[i] - pa[i];
-
-    return y;
-  }
-
-  VoxelToPhysicalWarpFunctor(TWarpImage *warp, ImageBaseType *moving)
-    : m_Warp(warp), m_MovingSpace(moving) {}
-
-  VoxelToPhysicalWarpFunctor() {}
-
-protected:
-
-  TWarpImage *m_Warp;
-  ImageBaseType *m_MovingSpace;
-};
-
-
-template <class TWarpImage>
-class PhysicalToVoxelWarpFunctor
-{
-public:
-  typedef itk::ImageBase<TWarpImage::ImageDimension> ImageBaseType;
-  typedef typename TWarpImage::PixelType VectorType;
-  typedef itk::Index<TWarpImage::ImageDimension> IndexType;
-
-  VectorType operator()(const VectorType &v, const IndexType &pos)
-  {
-    // Get the voxel offset between the tip of the arrow and the input position
-    // Get the physical point for the tail of the arrow
-    typedef itk::ContinuousIndex<double, TWarpImage::ImageDimension> CIType;
-    typedef typename TWarpImage::PointType PtType;
-
-    CIType ia, ib;
-    PtType pa, pb;
-
-    // Get the base physical position
-    for(int i = 0; i < TWarpImage::ImageDimension; i++)
-      ia[i] = pos[i];
-    m_Warp->TransformContinuousIndexToPhysicalPoint(ia, pa);
-
-    // Compute the tip physical position
-    for(int i = 0; i < TWarpImage::ImageDimension; i++)
-      pb[i] = pa[i] + v[i];
-
-    // Map the tip into continuous index
-    m_MovingSpace->TransformPhysicalPointToContinuousIndex(pb, ib);
-
-    VectorType y;
-    for(int i = 0; i < TWarpImage::ImageDimension; i++)
-      y[i] = ib[i] - ia[i];
-
-    return y;
-  }
-
-  PhysicalToVoxelWarpFunctor(TWarpImage *warp, ImageBaseType *moving)
-    : m_Warp(warp), m_MovingSpace(moving) {}
-
-  PhysicalToVoxelWarpFunctor() {}
-
-protected:
-
-  TWarpImage *m_Warp;
-  ImageBaseType *m_MovingSpace;
-};
-
-
-
-/**
- * This functor is used to compress a warp before saving it. The input
- * to this functor is a voxel-space warp, and the output is a physical
- * space warp, with the precision of the voxel-space warp reduced to a
- * prescribed value. The functor will also cast the warp to desired
- * output type
- */
-template <class TInputWarp, class TOutputWarp>
-class CompressWarpFunctor
-{
-public:
-  typedef VoxelToPhysicalWarpFunctor<TInputWarp> PhysFunctor;
-  typedef typename PhysFunctor::ImageBaseType ImageBaseType;
-
-  typedef typename TInputWarp::IndexType IndexType;
-  typedef typename TInputWarp::PixelType InputVectorType;
-  typedef typename TOutputWarp::PixelType OutputVectorType;
-
-  CompressWarpFunctor() {}
-
-  CompressWarpFunctor(TInputWarp *input, ImageBaseType *mov_space, double precision)
-    : m_InputWarp(input), m_Precision(precision), m_ScaleFactor(1.0 / m_Precision),
-      m_PhysFunctor(input, mov_space) {}
-
-  OutputVectorType operator()(const InputVectorType &v, const IndexType &pos)
-  {
-    InputVectorType w;
-
-    // Round to precision
-    if(m_Precision > 0)
-      {
-      for(int i = 0; i < TInputWarp::ImageDimension; i++)
-        w[i] = std::floor(v[i] * m_ScaleFactor + 0.5) * m_Precision;
-      }
-    else
-      {
-      w = v;
-      }
-
-    // Map to physical space
-    w = m_PhysFunctor(w, pos);
-
-    // Cast to output type
-    InputVectorType y;
-    for(int i = 0; i < TInputWarp::ImageDimension; i++)
-      y[i] = static_cast<typename OutputVectorType::ValueType>(w[i]);
-
-    return y;
-  }
-
-protected:
-  TInputWarp *m_InputWarp;
-  double m_Precision, m_ScaleFactor;
-  PhysFunctor m_PhysFunctor;
-};
 
 
 template <class TFloat, unsigned int VDim>

@@ -31,6 +31,7 @@
 #include <vector>
 #include <vnl/vnl_matrix.h>
 #include <vnl/vnl_vector.h>
+#include <ostream>
 
 class CommandLineHelper;
 
@@ -53,6 +54,10 @@ struct SmoothingParameters
   bool physical_units;
   SmoothingParameters(double s, bool pu) : sigma(s), physical_units(pu) {}
   SmoothingParameters() : sigma(0.0), physical_units(true) {}
+
+  bool operator != (const SmoothingParameters &other) {
+    return sigma != other.sigma || physical_units != other.physical_units;
+  }
 };
 
 enum RigidSearchRotationMode
@@ -196,18 +201,35 @@ public:
     return m_UseCommon || m_ValueArray.size() == n_Levels;
   }
 
+  bool operator != (const PerLevelSpec<TAtomic> &other)
+  {
+    if(m_UseCommon && other.m_UseCommon)
+      {
+      return m_CommonValue != m_CommonValue;
+      }
+    else if(!m_UseCommon && !other.m_UseCommon)
+      {
+      return m_ValueArray != other.m_ValueArray;
+      }
+    else return false;
+  }
+
+  friend std::ostream& operator << (std::ostream &oss, const PerLevelSpec<TAtomic> &val);
+
 protected:
   TAtomic m_CommonValue;
   std::vector<TAtomic> m_ValueArray;
   bool m_UseCommon;
 };
 
+
 struct GreedyParameters
 {
   enum MetricType { SSD = 0, NCC, MI, NMI, MAHALANOBIS };
   enum TimeStepMode { CONSTANT=0, SCALE, SCALEDOWN };
-  enum Mode { GREEDY=0, AFFINE, BRUTE, RESLICE, INVERT_WARP, ROOT_WARP, JACOBIAN_WARP, MOMENTS };
+  enum Mode { GREEDY=0, AFFINE, BRUTE, RESLICE, INVERT_WARP, ROOT_WARP, JACOBIAN_WARP, MOMENTS, METRIC };
   enum AffineDOF { DOF_RIGID=6, DOF_SIMILARITY=7, DOF_AFFINE=12 };
+  enum Verbosity { VERB_NONE=0, VERB_DEFAULT, VERB_VERBOSE, VERB_INVALID };
 
   std::vector<ImagePairSpec> inputs;
   std::string output;
@@ -276,6 +298,9 @@ struct GreedyParameters
   // Mask for the moving image
   std::string moving_mask;
 
+  // Mask for the moving image
+  std::string fixed_mask;
+
   // Inverse warp and root warp, for writing in deformable mode
   std::string inverse_warp, root_warp;
   int warp_exponent;
@@ -297,11 +322,14 @@ struct GreedyParameters
   int moments_order;
   bool flag_moments_id_covariance;
 
-  // Stationary velocity (diffeomophic demons) mode
+  // Stationary velocity (Vercauteren 2008 LogDemons) mode
   bool flag_stationary_velocity_mode;
 
-  // Whether the lie bracket is used in the y velocity update
+  // Whether the Lie bracket is used in the y velocity update
   bool flag_stationary_velocity_mode_use_lie_bracket;
+
+  // Incompressibility mode (Mansi 2011 iLogDemons)
+  bool flag_incompressibility_mode;
 
   // Floating point precision?
   bool flag_float_math;
@@ -316,9 +344,15 @@ struct GreedyParameters
 
   // Read parameters from the
   bool ParseCommandLine(const std::string &cmd, CommandLineHelper &cl);
+  
+  // Verbosity flag
+  Verbosity verbosity;
 
   // Constructor
   GreedyParameters() { SetToDefaults(*this); }
+
+  // Generate a command line for current parameters
+  std::string GenerateCommandLine();
 };
 
 
