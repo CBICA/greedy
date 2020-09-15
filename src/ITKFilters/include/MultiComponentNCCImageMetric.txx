@@ -164,7 +164,7 @@ MultiImageNCCPrecomputeFilter<TMetricTraits,TOutputImage>
             InputComponentType x_fix = iter.GetFixedLine()[k];
 
             // Check for NaN, which indicates that the pixel should not contribute to the metric
-            if(isnan(x_mov) || isnan(x_fix))
+            if(std::isnan(x_mov) || std::isnan(x_fix))
               {
               // Zero out just this component
               for(int j = 0; j < n_out_comp_per_input_comp; j++)
